@@ -252,7 +252,7 @@ setAnalysis(
       <header className="border-b border-slate-800 bg-slate-900/80">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
           <div>
-            <h1 className="text-2xl font-bold">🛡️ MailTrace AI</h1>
+            <h1 className="text-2xl font-bold">🛡️ MailCipherX-AI</h1>
             <p className="text-sm text-slate-400">
               Email Threat Detection & Forensics Intelligence
             </p>
@@ -1006,7 +1006,7 @@ role:
     </div>
 
     <p className="mt-5 text-xs text-yellow-400">
-      ⚠️ Attachment analysis is metadata-based. MailTrace AI never executes uploaded files.
+      ⚠️ Attachment analysis is metadata-based. MailCipherX-AI never executes uploaded files.
     </p>
   </section>
 )}
@@ -1341,7 +1341,7 @@ role:
             <div>
               <h3 className="text-xl font-semibold">🗂️ Investigation History</h3>
               <p className="mt-1 text-sm text-slate-400">
-                Previously analyzed emails saved by MailTrace AI.
+                Previously analyzed emails saved by MailCipherX-AI.
               </p>
             </div>
             <button
