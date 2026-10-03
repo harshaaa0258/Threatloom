@@ -61,6 +61,11 @@ except ImportError:
     )
 
 try:
+    from .attribution_assessment import build_attribution_assessment
+except ImportError:
+    from attribution_assessment import build_attribution_assessment
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -1960,6 +1965,16 @@ def analyze_email(request: EmailRequest):
     bec_analysis = analyze_bec_patterns(
         email_text, headers, url_obfuscation_analysis, urls
     )
+    attribution_assessment = build_attribution_assessment(
+        DB_PATH,
+        headers,
+        spf_result,
+        dkim_result,
+        dmarc_evaluation,
+        candidate_origin_ip,
+        candidate_origin_intelligence,
+        relay_path_analysis,
+    )
 
     for item in url_obfuscation_analysis["urls"]:
         signal_names = ", ".join(signal["type"].replace("_", " ") for signal in item["signals"])
@@ -1972,6 +1987,11 @@ def analyze_email(request: EmailRequest):
             findings.append(f"Shortened URL redirect destination observed: {destination}")
     for signal in bec_analysis["signals"]:
         findings.append(f"Possible BEC pattern ({signal['type'].replace('_', ' ')}): {signal['detail']}")
+    if attribution_assessment.get("status") == "assessment_available":
+        findings.append(
+            "Sender-domain and origin evidence consistency (not human identity proof): "
+            f"{attribution_assessment['confidence_score']}/100 ({attribution_assessment['confidence_label']})."
+        )
 
     score = min(score, 100)
 
@@ -2031,6 +2051,7 @@ def analyze_email(request: EmailRequest):
         "ml_classifier": ml_analysis,
         "bec_analysis": bec_analysis,
         "url_obfuscation_analysis": url_obfuscation_analysis,
+        "attribution_assessment": attribution_assessment,
         "received_headers": received_headers,
         "relay_path":relay_path,
         "relay_path_analysis": relay_path_analysis,
@@ -3055,6 +3076,17 @@ def generate_investigation_report(investigation_id: int):
         ("Analysis Note", nlp_analysis.get("note")),
     ]
     _add_report_section(story, "AI-Assisted NLP Analysis", nlp_rows, styles)
+
+    attribution = result.get("attribution_assessment") or {}
+    if attribution:
+        _add_report_section(story, "Sender and Origin Evidence Consistency", [
+            ("Confidence Score", f"{attribution.get('confidence_score', 0)}/100 ({attribution.get('confidence_label', 'Low')})"),
+            ("Candidate Sender Domain", attribution.get("candidate_sender_domain")),
+            ("Candidate Origin IP", attribution.get("candidate_origin_ip")),
+            ("Supporting and Conflicting Signals", attribution.get("signals") or []),
+            ("Related Investigations", attribution.get("correlated_investigations") or []),
+            ("Scope Note", attribution.get("note")),
+        ], styles)
 
     _add_report_section(
         story,
