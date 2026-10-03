@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import RelationshipGraph from "./RelationshipGraph";
 import InfrastructurePanel from "./InfrastructurePanel";
 import CaseManagement from "./CaseManagement";
+import EvidencePanel from "./EvidencePanel";
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -1416,6 +1417,7 @@ role:
                 <p><strong className="text-white">Origin IP:</strong> {selectedInvestigation.origin_ip || "Not available"}</p>
                 <p><strong className="text-white">Created:</strong> {selectedInvestigation.created_at ? new Date(selectedInvestigation.created_at).toLocaleString() : "Unknown"}</p>
               </div>
+              <EvidencePanel investigationId={selectedInvestigation.id ?? ""} />
               {selectedInvestigation.result && (
                 <details className="mt-5">
                   <summary className="cursor-pointer text-sm font-semibold text-blue-400">

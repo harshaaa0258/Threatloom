@@ -17,7 +17,7 @@ import sqlite3
 from datetime import datetime, timezone
 from io import BytesIO
 from email.utils import getaddresses
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from urllib.parse import urlsplit
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
@@ -40,6 +40,25 @@ try:
     from .message_patterns import analyze_bec_patterns, analyze_obfuscated_urls
 except ImportError:
     from message_patterns import analyze_bec_patterns, analyze_obfuscated_urls
+
+try:
+    from .chain_of_custody import (
+        append_evidence_event,
+        get_evidence_bundle,
+        get_verified_source_artifact,
+        initialize_evidence_tables,
+        purge_source_artifact,
+        sha256_bytes,
+    )
+except ImportError:
+    from chain_of_custody import (
+        append_evidence_event,
+        get_evidence_bundle,
+        get_verified_source_artifact,
+        initialize_evidence_tables,
+        purge_source_artifact,
+        sha256_bytes,
+    )
 
 try:
     import spf
@@ -74,6 +93,7 @@ app.add_middleware(
 
 class EmailRequest(BaseModel):
     email: str
+    source_file_base64: str | None = None
 
 
 class CaseCreateRequest(BaseModel):
@@ -87,6 +107,12 @@ class CaseUpdateRequest(BaseModel):
     description: str | None = None
     status: str | None = None
     tags: list[str] | None = None
+
+
+class EvidenceEventRequest(BaseModel):
+    event_type: str
+    actor: str = "unattributed"
+    notes: str = ""
 
 
 ALERT_STORE = []
@@ -1169,6 +1195,16 @@ def build_investigation_relationship_graph(investigations: list[dict]):
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "investigations.db")
 
 
+def _evidence_artifact_settings():
+    preserve_source = os.getenv("PRESERVE_RAW_EVIDENCE", "true").strip().lower() in {"1", "true", "yes"}
+    try:
+        max_size_mb = int(os.getenv("EVIDENCE_MAX_ARTIFACT_MB", "10"))
+    except ValueError:
+        max_size_mb = 10
+    max_size_mb = max(1, min(max_size_mb, 50))
+    return preserve_source, max_size_mb * 1024 * 1024
+
+
 def init_database():
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
@@ -1212,6 +1248,7 @@ def init_database():
             DELETE FROM case_investigations WHERE investigation_id = OLD.id;
         END
     """)
+    initialize_evidence_tables(connection)
     connection.commit()
     connection.close()
 
@@ -1299,6 +1336,19 @@ def alerts_stream():
 @app.post("/analyze")
 def analyze_email(request: EmailRequest):
     email_text = request.email
+    source_type = "submitted_text"
+    if request.source_file_base64 is not None:
+        try:
+            source_content = base64.b64decode(request.source_file_base64, validate=True)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Uploaded source evidence is not valid Base64.")
+        if len(source_content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Uploaded source evidence exceeds the 10 MB limit.")
+        source_type = "uploaded_eml"
+    else:
+        source_content = email_text.encode("utf-8")
+    source_sha256 = sha256_bytes(source_content)
+    analysis_text_sha256 = sha256_bytes(email_text.encode("utf-8"))
     email_lower = email_text.lower()
 
     headers = {}
@@ -2010,6 +2060,41 @@ def analyze_email(request: EmailRequest):
     investigation_id = save_investigation(result)
     result["investigation_id"] = investigation_id
 
+    preserve_source, max_artifact_bytes = _evidence_artifact_settings()
+    evidence_entry = append_evidence_event(
+        DB_PATH,
+        investigation_id,
+        "message_received",
+        actor="system",
+        notes="Source was received for email analysis.",
+        source_sha256=source_sha256,
+        analysis_text_sha256=analysis_text_sha256,
+        byte_length=len(source_content),
+        details={"source_type": source_type},
+        source_content=source_content,
+        preserve_source=preserve_source,
+        max_artifact_bytes=max_artifact_bytes,
+    )
+    artifact_status = evidence_entry["details"]["artifact_status"]
+    result["evidence_integrity"] = {
+        "source_sha256": source_sha256,
+        "analysis_text_sha256": analysis_text_sha256,
+        "source_bytes": len(source_content),
+        "source_type": source_type,
+        "artifact_status": artifact_status,
+        "ledger_entry_id": evidence_entry["id"],
+        "ledger_record_hash": evidence_entry["record_hash"],
+        "ledger_previous_hash": evidence_entry["previous_hash"],
+        "note": "The chain is locally hash-linked. Actor labels are not authenticated.",
+    }
+    findings.append(f"Evidence ledger recorded source SHA-256 {source_sha256}.")
+    if artifact_status == "stored":
+        findings.append("Original source bytes were preserved for later integrity verification.")
+    elif artifact_status == "not_stored_by_configuration":
+        findings.append("Only source hashes were preserved; raw evidence storage is disabled.")
+    else:
+        findings.append("Original source bytes exceeded the configured evidence storage limit and were not retained.")
+
     # Persist the generated investigation ID inside the stored record as well.
     update_investigation_result(investigation_id, result)
 
@@ -2210,6 +2295,12 @@ def investigation_relationship_graph(limit: int = 300):
 
 @app.delete("/investigations/{investigation_id}")
 def delete_investigation(investigation_id: int):
+    purge_source_artifact(
+        DB_PATH,
+        investigation_id,
+        actor="system",
+        reason="Investigation deleted; preserved source artifact purged.",
+    )
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
@@ -2238,6 +2329,17 @@ def delete_investigation(investigation_id: int):
 
 @app.delete("/investigations")
 def clear_investigations():
+    connection = sqlite3.connect(DB_PATH)
+    investigation_ids = [row[0] for row in connection.execute("SELECT id FROM investigations").fetchall()]
+    connection.close()
+    for investigation_id in investigation_ids:
+        purge_source_artifact(
+            DB_PATH,
+            investigation_id,
+            actor="system",
+            reason="All investigations cleared; preserved source artifact purged.",
+        )
+
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
@@ -2277,6 +2379,73 @@ def get_investigation(investigation_id: int):
     if not result["result"].get("recommendations"):
         result["result"]["recommendations"] = build_recommendations(result["result"])
     return result
+
+
+@app.get("/investigations/{investigation_id}/evidence")
+def get_investigation_evidence(investigation_id: int):
+    bundle = get_evidence_bundle(DB_PATH, investigation_id)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="No evidence ledger exists for this investigation.")
+    return bundle
+
+
+@app.post("/investigations/{investigation_id}/evidence/events")
+def record_investigation_evidence_event(investigation_id: int, request: EvidenceEventRequest):
+    allowed_events = {"reviewed", "transferred", "custody_note"}
+    event_type = request.event_type.strip().lower()
+    actor = request.actor.strip()
+    notes = request.notes.strip()
+    if event_type not in allowed_events:
+        raise HTTPException(status_code=400, detail="Event type must be reviewed, transferred, or custody_note.")
+    if not actor or len(actor) > 120:
+        raise HTTPException(status_code=400, detail="Actor label must contain 1 to 120 characters.")
+    if len(notes) > 2000:
+        raise HTTPException(status_code=400, detail="Event notes cannot exceed 2000 characters.")
+    connection = sqlite3.connect(DB_PATH)
+    exists = connection.execute("SELECT 1 FROM investigations WHERE id = ?", (investigation_id,)).fetchone()
+    connection.close()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    try:
+        entry = append_evidence_event(
+            DB_PATH,
+            investigation_id,
+            event_type,
+            actor=actor,
+            notes=notes,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    return {"success": True, "event": entry}
+
+
+@app.get("/investigations/{investigation_id}/evidence/source")
+def download_investigation_source(investigation_id: int):
+    content, status = get_verified_source_artifact(DB_PATH, investigation_id)
+    if status in {"integrity_mismatch", "ledger_integrity_mismatch"}:
+        raise HTTPException(status_code=409, detail="Evidence integrity verification failed; source download is disabled.")
+    if content is None:
+        raise HTTPException(status_code=404, detail="Verified source artifact is unavailable or was purged.")
+    try:
+        append_evidence_event(
+            DB_PATH,
+            investigation_id,
+            "source_downloaded",
+            actor="system",
+            notes="Preserved source message downloaded through the evidence endpoint.",
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    bundle = get_evidence_bundle(DB_PATH, investigation_id)
+    digest = bundle["source"]["sha256"] if bundle else ""
+    return Response(
+        content=content,
+        media_type="message/rfc822",
+        headers={
+            "Content-Disposition": f'attachment; filename="investigation-{investigation_id}.eml"',
+            "X-Content-SHA256": digest,
+        },
+    )
 
 
 @app.get("/api/ip-intelligence/{ip}")
@@ -2969,6 +3138,16 @@ def generate_investigation_report(investigation_id: int):
 
     _add_report_section(story, "Security Findings", finding_rows, styles)
 
+    evidence_integrity = result.get("evidence_integrity") or {}
+    if evidence_integrity:
+        _add_report_section(story, "Evidence Integrity", [
+            ("Source SHA-256", evidence_integrity.get("source_sha256")),
+            ("Analyzed Text SHA-256", evidence_integrity.get("analysis_text_sha256")),
+            ("Source Bytes", evidence_integrity.get("source_bytes")),
+            ("Artifact Status", evidence_integrity.get("artifact_status")),
+            ("Ledger Record Hash", evidence_integrity.get("ledger_record_hash")),
+        ], styles)
+
     recommendation_rows = []
     for index, item in enumerate(recommendations, start=1):
         priority = item.get("priority", "Informational")
@@ -3048,6 +3227,15 @@ def generate_investigation_report(investigation_id: int):
     doc.build(story, onFirstPage=_report_page, onLaterPages=_report_page)
     buffer.seek(0)
 
+    if get_evidence_bundle(DB_PATH, investigation_id):
+        append_evidence_event(
+            DB_PATH,
+            investigation_id,
+            "report_generated",
+            actor="system",
+            notes="Forensic PDF report was generated.",
+        )
+
     filename = f"mailtrace_investigation_{investigation_id}.pdf"
 
     return StreamingResponse(
@@ -3099,7 +3287,10 @@ async def upload_email(file: UploadFile = File(...)):
             "details": str(e),
         }
 
-    result = analyze_email(EmailRequest(email=email_text))
+    result = analyze_email(EmailRequest(
+        email=email_text,
+        source_file_base64=base64.b64encode(content).decode("ascii"),
+    ))
 
     result["attachments"] = attachments
 
