@@ -127,9 +127,11 @@ def _visible_link_mismatches(email_text: str) -> list[dict]:
     return mismatches
 
 
-def _resolve_shortener(url: str) -> dict:
+def _resolve_shortener(url: str, enabled: bool | None = None) -> dict:
     """Optionally inspect a bounded redirect chain from known shortener hosts only."""
-    if os.getenv("ENABLE_SAFE_SHORTENER_RESOLUTION", "false").strip().lower() not in {"1", "true", "yes"}:
+    if enabled is None:
+        enabled = os.getenv("ENABLE_SAFE_SHORTENER_RESOLUTION", "false").strip().lower() in {"1", "true", "yes"}
+    if not enabled:
         return {"status": "disabled", "chain": [url]}
 
     current = url
@@ -188,8 +190,14 @@ def _resolve_shortener(url: str) -> dict:
         session.close()
 
 
-def analyze_obfuscated_urls(urls: list[str] | None, email_text: str = "") -> dict:
+def analyze_obfuscated_urls(
+    urls: list[str] | None,
+    email_text: str = "",
+    resolve_shorteners: bool | None = None,
+) -> dict:
     """Describe URL camouflage; optionally inspect only known shortener redirects."""
+    if resolve_shorteners is None:
+        resolve_shorteners = os.getenv("ENABLE_SAFE_SHORTENER_RESOLUTION", "false").strip().lower() in {"1", "true", "yes"}
     url_results = []
     shortener_results = []
     for raw_url in urls or []:
@@ -198,7 +206,7 @@ def analyze_obfuscated_urls(urls: list[str] | None, email_text: str = "") -> dic
             url_results.append({"url": str(raw_url), "signals": signals})
         if any(signal["type"] == "shortener" for signal in signals):
             if len(shortener_results) < 5:
-                shortener_results.append({"url": str(raw_url), **_resolve_shortener(str(raw_url))})
+                shortener_results.append({"url": str(raw_url), **_resolve_shortener(str(raw_url), resolve_shorteners)})
             else:
                 shortener_results.append({"url": str(raw_url), "status": "limit_reached", "chain": [str(raw_url)]})
     link_mismatches = _visible_link_mismatches(email_text)
@@ -208,7 +216,7 @@ def analyze_obfuscated_urls(urls: list[str] | None, email_text: str = "") -> dic
         "url_count": len(urls or []),
         "link_text_signals": link_mismatches,
         "shortener_resolution": {
-            "status": "disabled" if os.getenv("ENABLE_SAFE_SHORTENER_RESOLUTION", "false").strip().lower() not in {"1", "true", "yes"} else "enabled",
+            "status": "enabled" if resolve_shorteners else "disabled",
             "results": shortener_results,
             "note": "When enabled, requests are limited to known shortener hosts, with public DNS checks, timeouts, and a four-hop cap.",
         },

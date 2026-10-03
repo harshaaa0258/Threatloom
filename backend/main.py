@@ -95,6 +95,11 @@ except ImportError:
     from phishing_intel import check_phishtank_urls
 
 try:
+    from .gmail_monitor import GmailInboxMonitor
+except ImportError:
+    from gmail_monitor import GmailInboxMonitor
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -1594,17 +1599,19 @@ async def _retention_sweep_loop():
 @app.on_event("startup")
 async def start_retention_sweeper():
     app.state.retention_task = asyncio.create_task(_retention_sweep_loop())
+    app.state.gmail_monitor_task = asyncio.create_task(gmail_monitor.run())
 
 
 @app.on_event("shutdown")
 async def stop_retention_sweeper():
-    task = getattr(app.state, "retention_task", None)
-    if task is not None:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    for task_name in ("retention_task", "gmail_monitor_task"):
+        task = getattr(app.state, task_name, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 def save_investigation(result: dict):
@@ -1735,7 +1742,13 @@ def analyze_email(request: EmailRequest):
     return _analyze_email(request, mask_response=True)
 
 
-def _analyze_email(request: EmailRequest, mask_response: bool):
+def _analyze_email(
+    request: EmailRequest,
+    mask_response: bool,
+    persist: bool = True,
+    allow_external_lookups: bool = True,
+    alert_source: str = "email_analysis",
+):
     email_text = request.email
     source_type = "submitted_text"
     if request.source_file_base64 is not None:
@@ -1787,16 +1800,26 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
         if domain and domain not in intelligence_domains:
             intelligence_domains.append(domain)
 
-    domain_intelligence = [
-        check_domain_intelligence(domain, include_whois=(domain == sender_domain_for_intel))
-        for domain in intelligence_domains[:5]
-    ]
+    if allow_external_lookups:
+        domain_intelligence = [
+            check_domain_intelligence(domain, include_whois=(domain == sender_domain_for_intel))
+            for domain in intelligence_domains[:5]
+        ]
+    else:
+        domain_intelligence = [
+            {"domain": domain, "status": "not_checked_privacy", "dns": {}, "rdap": {}, "signals": []}
+            for domain in intelligence_domains[:5]
+        ]
 
     # Check extracted URLs against VirusTotal
     url_intelligence = []
 
     for url in urls:
-        result = check_virustotal_url(url)
+        result = (
+            check_virustotal_url(url)
+            if allow_external_lookups
+            else {"status": "not_checked_privacy", "url": url}
+        )
         url_intelligence.append(result)
         # Add VirusTotal URL intelligence to the risk score
     for result in url_intelligence:
@@ -1826,7 +1849,14 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
             )    
 
     # PhishTank checks are opt-in, rate-bounded, and cached by exact URL.
-    phishtank_intelligence = check_phishtank_urls(urls)
+    phishtank_intelligence = (
+        check_phishtank_urls(urls)
+        if allow_external_lookups
+        else {
+            "source_status": "not_checked_privacy",
+            "checks": [{"url": url, "status": "not_checked_privacy"} for url in urls],
+        }
+    )
     phishtank_by_url = {item["url"]: item for item in phishtank_intelligence["checks"]}
     for result in url_intelligence:
         match = phishtank_by_url.get(result.get("url"), {"status": "not_checked"})
@@ -1980,7 +2010,11 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
         hop_details = []
 
         for ip in found_ips:
-            intelligence = lookup_ip(ip)
+            intelligence = (
+                lookup_ip(ip)
+                if allow_external_lookups
+                else {"status": "not_checked_privacy", "ip": ip}
+            )
 
             hop_details.append({
                 "ip": ip,
@@ -2038,9 +2072,17 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
     ip_intelligence = []
 
     for ip in ip_addresses:
-        intelligence = lookup_ip(ip)
+        intelligence = (
+            lookup_ip(ip)
+            if allow_external_lookups
+            else {"status": "not_checked_privacy", "ip": ip}
+        )
 
-        reputation = check_virustotal_ip(ip)
+        reputation = (
+            check_virustotal_ip(ip)
+            if allow_external_lookups
+            else {"status": "not_checked_privacy", "malicious": 0, "suspicious": 0}
+        )
 
         intelligence["reputation"] = reputation
 
@@ -2368,7 +2410,15 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
     # so the same language indicators are not double-counted.
     nlp_analysis = analyze_email_nlp(email_text, headers, urls)
     ml_analysis = classify_email_ml(email_text, headers, urls)
-    url_obfuscation_analysis = analyze_obfuscated_urls(urls, email_text)
+    resolve_shorteners = (
+        allow_external_lookups
+        and os.getenv("ENABLE_SAFE_SHORTENER_RESOLUTION", "false").strip().lower() in {"1", "true", "yes"}
+    )
+    url_obfuscation_analysis = analyze_obfuscated_urls(
+        urls,
+        email_text,
+        resolve_shorteners=resolve_shorteners,
+    )
     bec_analysis = analyze_bec_patterns(
         email_text, headers, url_obfuscation_analysis, urls
     )
@@ -2436,12 +2486,39 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
         domain_intelligence,
         url_intelligence,
     )
-    infrastructure_intelligence = build_infrastructure_intelligence(ip_intelligence)
+    if allow_external_lookups:
+        infrastructure_intelligence = build_infrastructure_intelligence(ip_intelligence)
+    else:
+        infrastructure_intelligence = {
+            "summary": {
+                "ips_checked": 0,
+                "tor_exit_ips": 0,
+                "vpn_or_proxy_ips": 0,
+                "hosting_ips": 0,
+                "abuse_reported_ips": 0,
+                "botnet_c2_ips": 0,
+                "open_relay_ips": 0,
+                "abuseipdb_ips_checked": 0,
+            },
+            "source_status": {
+                "ip_api_proxy_hosting": "not_checked_privacy",
+                "tor_project_exit_list": "not_checked_privacy",
+                "abuseipdb": "not_checked_privacy",
+                "botnet_c2_list": "not_checked_privacy",
+                "feodo_tracker_botnet_c2": "not_checked_privacy",
+                "open_relay_list": "not_checked_privacy",
+            },
+            "indicators": [],
+            "note": "Third-party infrastructure lookups were skipped by the Gmail monitoring privacy setting.",
+        }
     threat_intelligence["indicators"].extend(infrastructure_intelligence["indicators"])
     threat_intelligence["infrastructure_summary"] = infrastructure_intelligence["summary"]
     threat_intelligence["infrastructure_source_status"] = infrastructure_intelligence["source_status"]
     threat_intelligence["source_status"].update({
-        "virustotal": "configured" if VIRUSTOTAL_API_KEY else "not_configured",
+        "virustotal": (
+            ("configured" if VIRUSTOTAL_API_KEY else "not_configured")
+            if allow_external_lookups else "not_checked_privacy"
+        ),
         "abuseipdb": infrastructure_intelligence["source_status"].get("abuseipdb", "unknown"),
         "phishtank": phishtank_intelligence["source_status"],
     })
@@ -2483,55 +2560,91 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
 
     if score >= 60 or ml_analysis.get("classification") in {"phishing", "fraud", "suspicious", "impersonated"}:
         alert = push_alert(
-            "email_analysis",
-            f"High-risk {ml_analysis.get('classification', 'email')} threat detected",
+            alert_source,
+            (
+                f"New Gmail message classified as {ml_analysis.get('classification', 'high risk')}"
+                if alert_source == "gmail_monitor"
+                else f"High-risk {ml_analysis.get('classification', 'email')} threat detected"
+            ),
             "high" if score >= 60 else "medium",
             {"score": score, "classification": classification, "risk_level": risk_level},
         )
         result["alert"] = alert
 
-    investigation_id = save_investigation(result)
-    result["investigation_id"] = investigation_id
+    if persist:
+        investigation_id = save_investigation(result)
+        result["investigation_id"] = investigation_id
 
-    preserve_source, max_artifact_bytes = _evidence_artifact_settings()
-    evidence_entry = append_evidence_event(
-        DB_PATH,
-        investigation_id,
-        "message_received",
-        actor="system",
-        notes="Source was received for email analysis.",
-        source_sha256=source_sha256,
-        analysis_text_sha256=analysis_text_sha256,
-        byte_length=len(source_content),
-        details={"source_type": source_type},
-        source_content=source_content,
-        preserve_source=preserve_source,
-        max_artifact_bytes=max_artifact_bytes,
-    )
-    artifact_status = evidence_entry["details"]["artifact_status"]
-    result["evidence_integrity"] = {
-        "source_sha256": source_sha256,
-        "analysis_text_sha256": analysis_text_sha256,
-        "source_bytes": len(source_content),
-        "source_type": source_type,
-        "artifact_status": artifact_status,
-        "ledger_entry_id": evidence_entry["id"],
-        "ledger_record_hash": evidence_entry["record_hash"],
-        "ledger_previous_hash": evidence_entry["previous_hash"],
-        "note": "The chain is locally hash-linked. Actor labels are not authenticated.",
-    }
-    findings.append(f"Evidence ledger recorded source SHA-256 {source_sha256}.")
-    if artifact_status == "stored":
-        findings.append("Original source bytes were preserved for later integrity verification.")
-    elif artifact_status == "not_stored_by_configuration":
-        findings.append("Only source hashes were preserved; raw evidence storage is disabled.")
+        preserve_source, max_artifact_bytes = _evidence_artifact_settings()
+        evidence_entry = append_evidence_event(
+            DB_PATH,
+            investigation_id,
+            "message_received",
+            actor="system",
+            notes="Source was received for email analysis.",
+            source_sha256=source_sha256,
+            analysis_text_sha256=analysis_text_sha256,
+            byte_length=len(source_content),
+            details={"source_type": source_type},
+            source_content=source_content,
+            preserve_source=preserve_source,
+            max_artifact_bytes=max_artifact_bytes,
+        )
+        artifact_status = evidence_entry["details"]["artifact_status"]
+        result["evidence_integrity"] = {
+            "source_sha256": source_sha256,
+            "analysis_text_sha256": analysis_text_sha256,
+            "source_bytes": len(source_content),
+            "source_type": source_type,
+            "artifact_status": artifact_status,
+            "ledger_entry_id": evidence_entry["id"],
+            "ledger_record_hash": evidence_entry["record_hash"],
+            "ledger_previous_hash": evidence_entry["previous_hash"],
+            "note": "The chain is locally hash-linked. Actor labels are not authenticated.",
+        }
+        findings.append(f"Evidence ledger recorded source SHA-256 {source_sha256}.")
+        if artifact_status == "stored":
+            findings.append("Original source bytes were preserved for later integrity verification.")
+        elif artifact_status == "not_stored_by_configuration":
+            findings.append("Only source hashes were preserved; raw evidence storage is disabled.")
+        else:
+            findings.append("Original source bytes exceeded the configured evidence storage limit and were not retained.")
+
+        # Persist the generated investigation ID inside the stored record as well.
+        update_investigation_result(investigation_id, result)
     else:
-        findings.append("Original source bytes exceeded the configured evidence storage limit and were not retained.")
-
-    # Persist the generated investigation ID inside the stored record as well.
-    update_investigation_result(investigation_id, result)
+        result["evidence_integrity"] = {
+            "source_sha256": source_sha256,
+            "analysis_text_sha256": analysis_text_sha256,
+            "source_bytes": len(source_content),
+            "source_type": "gmail_monitor_ephemeral",
+            "artifact_status": "not_persisted_by_privacy_policy",
+            "note": "This mailbox message was analyzed in memory; message content and analysis details were not saved.",
+        }
 
     return _privacy_response(result) if mask_response else result
+
+
+def _analyze_gmail_message(message_text: str, allow_external_intel: bool):
+    return _analyze_email(
+        EmailRequest(email=message_text),
+        mask_response=False,
+        persist=False,
+        allow_external_lookups=allow_external_intel,
+        alert_source="gmail_monitor",
+    )
+
+
+gmail_monitor = GmailInboxMonitor(
+    os.getenv("GMAIL_MONITOR_DB_PATH", DB_PATH),
+    _analyze_gmail_message,
+)
+gmail_monitor.initialize()
+
+
+@app.get("/gmail-monitor/status")
+def gmail_monitor_status():
+    return gmail_monitor.public_status()
 
 
 @app.get("/investigations")

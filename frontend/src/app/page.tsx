@@ -7,6 +7,7 @@ import CaseManagement from "./CaseManagement";
 import EvidencePanel from "./EvidencePanel";
 import PrivacySettingsPanel from "./PrivacySettingsPanel";
 import AlertFeed from "./AlertFeed";
+import GmailMonitorPanel from "./GmailMonitorPanel";
 import MlClassifierPanel from "./MlClassifierPanel";
 
 type ScoreBreakdownItem = {
@@ -1509,6 +1510,7 @@ locations={ipLocations
         <RelationshipGraph />
         <CaseManagement />
         <PrivacySettingsPanel />
+        <GmailMonitorPanel />
         <AlertFeed />
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
