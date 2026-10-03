@@ -17,6 +17,7 @@ from chain_of_custody import (
 )
 from attribution_assessment import build_attribution_assessment
 from dkim_verification import verify_dkim_signatures
+from evaluate_ml_model import EvaluationDataError, evaluate_holdout
 from main import (
     ReviewedTrainingDataError,
     _load_ml_training_data,
@@ -27,6 +28,66 @@ from main import (
 from message_patterns import analyze_bec_patterns, analyze_obfuscated_urls
 from privacy_controls import mask_sensitive_data
 from relay_forensics import analyze_relay_path
+
+
+def test_ml_holdout_evaluator_reports_metrics_without_email_content(tmp_path):
+    training = tmp_path / "train.csv"
+    testing = tmp_path / "test.csv"
+    training_rows = [
+        (f"Team planning meeting agenda update number {index}", "legitimate")
+        for index in range(8)
+    ] + [
+        (f"Urgent verify your account password immediately code {index}", "phishing")
+        for index in range(7)
+    ]
+    training.write_text(
+        "text,label\n"
+        + "".join(f'"{text}",{label}\n' for text, label in training_rows),
+        encoding="utf-8",
+    )
+    testing.write_text(
+        "text,label\n"
+        "Please review the department agenda,legitimate\n"
+        "Account suspended verify your password now,phishing\n",
+        encoding="utf-8",
+    )
+
+    report = evaluate_holdout(training, testing)
+
+    assert report["report_type"] == "separate_holdout_evaluation"
+    assert report["training"]["samples"] == 15
+    assert report["test"]["samples"] == 2
+    assert set(report["per_class"]) == {"legitimate", "phishing"}
+    assert 0 <= report["metrics"]["legitimate_false_positive_rate"] <= 1
+    assert "password immediately code" not in json.dumps(report).lower()
+    assert any("fewer than 1,000" in warning for warning in report["warnings"])
+    assert report["evidence_status"].startswith("Dataset labels and provenance")
+
+
+def test_ml_holdout_evaluator_rejects_leaked_messages(tmp_path):
+    training = tmp_path / "train.csv"
+    testing = tmp_path / "test.csv"
+    training_rows = [
+        (f"Unique legitimate sample number {index}", "legitimate")
+        for index in range(8)
+    ] + [
+        (f"Unique phishing sample number {index}", "phishing")
+        for index in range(7)
+    ]
+    training.write_text(
+        "text,label\n"
+        + "".join(f'"{text}",{label}\n' for text, label in training_rows),
+        encoding="utf-8",
+    )
+    testing.write_text(
+        "text,label\n"
+        "Unique legitimate sample number 0,legitimate\n"
+        "Independent phishing message,phishing\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvaluationDataError, match="overlap"):
+        evaluate_holdout(training, testing)
 
 
 def test_dkim_verification_cryptographically_checks_message_bytes(monkeypatch):

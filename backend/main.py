@@ -96,6 +96,11 @@ except ImportError:
     from phishing_intel import check_phishtank_urls
 
 try:
+    from .ml_model import build_email_ml_pipeline
+except ImportError:
+    from ml_model import build_email_ml_pipeline
+
+try:
     from .dkim_verification import verify_dkim_signatures
 except ImportError:
     from dkim_verification import verify_dkim_signatures
@@ -416,13 +421,7 @@ def classify_email_ml(email_text: str, headers: dict | None = None, urls: list |
             and training_metadata.get("source") != "configured_csv"
         ):
             training_data, training_metadata = _load_ml_training_data()
-            model = Pipeline([
-                ("features", FeatureUnion([
-                    ("word", TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True, max_features=20000)),
-                    ("character", TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), sublinear_tf=True, max_features=20000)),
-                ])),
-                ("clf", LogisticRegression(max_iter=1500, class_weight="balanced", solver="lbfgs")),
-            ])
+            model = build_email_ml_pipeline()
             model.fit([sample for sample, _ in training_data], [label for _, label in training_data])
             classify_email_ml._model = model
             classify_email_ml._training_metadata = training_metadata

@@ -16,6 +16,28 @@ reviewed datasets on a separate held-out sample before using model scores for
 operational decisions; reported classifier scores are not calibrated
 probabilities.
 
+### Measuring classifier performance
+
+Use the separate training and held-out CSV files to evaluate the same model
+pipeline used by analysis:
+
+```powershell
+python backend/evaluate_ml_model.py --train reviewed-train.csv --test reviewed-test.csv `
+  --json-out evaluation.json --markdown-out evaluation.md
+```
+
+Both UTF-8 CSVs need `text,label` columns and one of the five supported labels.
+Training data needs at least 15 rows and three examples per label; the test
+file must contain every training label and at least one legitimate and one
+threat example. Exact duplicate messages and train/test overlap are rejected.
+The report includes accuracy, balanced accuracy, macro/weighted F1, per-class
+precision/recall/F1 and false-positive rates, legitimate false-positive rate,
+threat false-negative rate, and confusion matrix. It stores dataset hashes,
+not message contents. Small test sets are explicitly warned about. The tool
+cannot independently verify that labels were reviewed or that the test set is
+representative; record dataset provenance and review the metrics before using
+them for operational decisions.
+
 ## Campaign suggestions
 
 `GET /campaigns/suggestions` proposes clusters from repeated exact sender
