@@ -38,10 +38,9 @@ export default function EvidencePanel({ investigationId }: { investigationId: nu
   const [actor, setActor] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const loadEvidence = useCallback(async () => {
-    setLoading(true);
     try {
       const response = await fetch(`${API}/investigations/${investigationId}/evidence`);
       const data = await response.json();
@@ -57,8 +56,28 @@ export default function EvidencePanel({ investigationId }: { investigationId: nu
   }, [investigationId]);
 
   useEffect(() => {
-    void loadEvidence();
-  }, [loadEvidence]);
+    let cancelled = false;
+    const fetchEvidence = async () => {
+      try {
+        const response = await fetch(`${API}/investigations/${investigationId}/evidence`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load evidence history.");
+        if (cancelled) return;
+        setBundle(data);
+        setError("");
+      } catch (reason) {
+        if (cancelled) return;
+        setBundle(null);
+        setError(reason instanceof Error ? reason.message : "Could not load evidence history.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void fetchEvidence();
+    return () => {
+      cancelled = true;
+    };
+  }, [investigationId]);
 
   const addEvent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -110,7 +129,14 @@ export default function EvidencePanel({ investigationId }: { investigationId: nu
           <h5 className="font-semibold text-slate-100">Evidence chain of custody</h5>
           <p className="mt-1 text-xs text-slate-400">Source hashes, preserved message integrity, and custody events.</p>
         </div>
-        <button onClick={() => void loadEvidence()} disabled={loading} className="rounded-lg border border-slate-700 px-3 py-2 text-xs hover:border-blue-500 disabled:opacity-50">
+        <button
+          onClick={() => {
+            setLoading(true);
+            void loadEvidence();
+          }}
+          disabled={loading}
+          className="rounded-lg border border-slate-700 px-3 py-2 text-xs hover:border-blue-500 disabled:opacity-50"
+        >
           {loading ? "Loading…" : "Refresh"}
         </button>
       </div>

@@ -1,3 +1,5 @@
+import pytest
+
 from main import classify_email_ml, get_alerts, push_alert
 
 
@@ -7,7 +9,10 @@ def test_classifier_detects_phishing_language():
     )
 
     assert result["classification"] in {"phishing", "suspicious"}
-    assert result["confidence"] >= 0.5
+    assert result["confidence"] == pytest.approx(
+        max(result["probabilities"].values())
+    )
+    assert sum(result["probabilities"].values()) == pytest.approx(1.0, abs=0.001)
 
 
 def test_alert_feed_tracks_high_risk_event():

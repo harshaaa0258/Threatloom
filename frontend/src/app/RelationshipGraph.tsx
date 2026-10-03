@@ -50,12 +50,11 @@ export default function RelationshipGraph() {
   const [error, setError] = useState("");
 
   const loadGraph = useCallback(async () => {
-    setLoading(true);
-    setError("");
     try {
       const response = await fetch(`${backendUrl}/investigations/graph?limit=300`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not load relationship data.");
+      setError("");
       setGraph(data);
     } catch {
       setError("Relationship data is unavailable. Check that the analysis backend is online.");
@@ -65,8 +64,27 @@ export default function RelationshipGraph() {
   }, []);
 
   useEffect(() => {
-    void loadGraph();
-  }, [loadGraph]);
+    let cancelled = false;
+    const fetchGraph = async () => {
+      try {
+        const response = await fetch(`${backendUrl}/investigations/graph?limit=300`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load relationship data.");
+        if (cancelled) return;
+        setError("");
+        setGraph(data);
+      } catch {
+        if (cancelled) return;
+        setError("Relationship data is unavailable. Check that the analysis backend is online.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void fetchGraph();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const layout = useMemo(() => {
     const visibleNodes = columns.flatMap((type) =>
@@ -96,7 +114,11 @@ export default function RelationshipGraph() {
           </p>
         </div>
         <button
-          onClick={() => void loadGraph()}
+          onClick={() => {
+            setLoading(true);
+            setError("");
+            void loadGraph();
+          }}
           disabled={loading}
           className="rounded-xl border border-slate-700 bg-slate-950 px-4 py-2 text-sm font-semibold hover:border-blue-500 disabled:opacity-50"
         >

@@ -1,6 +1,6 @@
 "use client";
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import RelationshipGraph from "./RelationshipGraph";
 import InfrastructurePanel from "./InfrastructurePanel";
 import CaseManagement from "./CaseManagement";
@@ -117,6 +117,13 @@ type InvestigationRecord = {
   [key: string]: unknown;
 };
 
+async function fetchInvestigations(): Promise<InvestigationRecord[]> {
+  const response = await fetch("https://threatloom.onrender.com/investigations");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.message || "Failed to load investigations.");
+  return Array.isArray(data.investigations) ? data.investigations : [];
+}
+
 type NlpAnalysis = {
   assessment?: string;
   signal_score?: number | null;
@@ -184,10 +191,10 @@ export default function Home() {
   const [nlpAnalysis, setNlpAnalysis] = useState<NlpAnalysis | null>(null);
   const [mlClassifier, setMlClassifier] = useState<MlClassifierRecord | null>(null);
   const [investigations, setInvestigations] = useState<InvestigationRecord[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [selectedInvestigation, setSelectedInvestigation] = useState<InvestigationRecord | null>(null);
   const [historyError, setHistoryError] = useState("");
-useEffect(() => {
+  useEffect(() => {
     fetch("https://threatloom.onrender.com/health")
       .then((response) => response.json())
       .then((data) => {
@@ -198,25 +205,38 @@ useEffect(() => {
       });
   }, []);
 
-  useEffect(() => {
-    loadInvestigations();
-  }, []);
-
-  const loadInvestigations = async () => {
-    setHistoryLoading(true);
-    setHistoryError("");
+  const loadInvestigations = useCallback(async () => {
     try {
-      const response = await fetch("https://threatloom.onrender.com/investigations");
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || "Failed to load investigations.");
-      setInvestigations(Array.isArray(data.investigations) ? data.investigations : []);
+      setInvestigations(await fetchInvestigations());
+      setHistoryError("");
     } catch (error) {
       console.error("Investigation history failed:", error);
       setHistoryError("Could not load investigation history.");
     } finally {
       setHistoryLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchInitialHistory = async () => {
+      try {
+        const records = await fetchInvestigations();
+        if (!cancelled) {
+          setInvestigations(records);
+          setHistoryError("");
+        }
+      } catch {
+        if (!cancelled) setHistoryError("Could not load investigation history.");
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    };
+    void fetchInitialHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const viewInvestigation = async (id: number) => {
     try {
@@ -389,7 +409,7 @@ setAnalysis(
         `Analysis complete. Threat Score: ${data.threat_score}`
       );
       await loadInvestigations();
-    } catch (error) {
+    } catch {
       setAnalysis("Backend connection failed.");
     }
   };
@@ -1064,7 +1084,7 @@ locations={ipLocations
 
     <p className="mt-4 text-xs text-yellow-400">
       ⚠️ Relay information is based on the email headers provided.
-      It does not by itself prove the sender's identity or exact origin.
+      It does not by itself prove the sender&apos;s identity or exact origin.
     </p>
   </div>
 ) : (
@@ -1661,34 +1681,6 @@ function ThreatIntelStat({
     <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
       <p className="text-xs text-slate-500">{label}</p>
       <p className="mt-2 text-2xl font-bold text-white">{value}</p>
-    </div>
-  );
-}
-
-function SecurityCard({
-  title,
-  icon,
-  status,
-}: {
-  title: string;
-  icon: string;
-  status: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">
-          {icon} {title}
-        </h3>
-
-        <span className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-400">
-          Pending
-        </span>
-      </div>
-
-      <p className="mt-4 text-sm text-slate-400">
-        {status}
-      </p>
     </div>
   );
 }

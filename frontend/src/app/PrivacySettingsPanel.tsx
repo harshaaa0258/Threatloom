@@ -32,7 +32,6 @@ export default function PrivacySettingsPanel() {
   };
 
   const loadSettings = useCallback(async () => {
-    setLoading(true);
     try {
       const response = await fetch(`${API}/privacy/settings`);
       const data = await response.json();
@@ -47,8 +46,27 @@ export default function PrivacySettingsPanel() {
   }, []);
 
   useEffect(() => {
-    void loadSettings();
-  }, [loadSettings]);
+    let cancelled = false;
+    const fetchSettings = async () => {
+      try {
+        const response = await fetch(`${API}/privacy/settings`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load privacy settings.");
+        if (cancelled) return;
+        applySettings(data);
+        setError("");
+      } catch (reason) {
+        if (cancelled) return;
+        setError(reason instanceof Error ? reason.message : "Could not load privacy settings.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void fetchSettings();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -106,7 +124,16 @@ export default function PrivacySettingsPanel() {
           <h3 className="text-xl font-semibold">Privacy and retention</h3>
           <p className="mt-1 text-sm text-slate-400">Choose how long saved investigations remain and which identifiers are masked in outputs.</p>
         </div>
-        <button onClick={() => void loadSettings()} disabled={loading || busy} className="rounded-lg border border-slate-700 px-3 py-2 text-xs hover:border-blue-500 disabled:opacity-50">Refresh</button>
+        <button
+          onClick={() => {
+            setLoading(true);
+            void loadSettings();
+          }}
+          disabled={loading || busy}
+          className="rounded-lg border border-slate-700 px-3 py-2 text-xs hover:border-blue-500 disabled:opacity-50"
+        >
+          Refresh
+        </button>
       </div>
 
       {error && <p className="mt-4 rounded-lg border border-red-900/50 bg-red-950/20 p-3 text-sm text-red-300">{error}</p>}

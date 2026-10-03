@@ -373,7 +373,7 @@ def classify_email_ml(email_text: str, headers: dict | None = None, urls: list |
                     ("word", TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True, max_features=20000)),
                     ("character", TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), sublinear_tf=True, max_features=20000)),
                 ])),
-                ("clf", LogisticRegression(max_iter=1500, class_weight="balanced", solver="liblinear")),
+                ("clf", LogisticRegression(max_iter=1500, class_weight="balanced", solver="lbfgs")),
             ])
             model.fit([sample for sample, _ in training_data], [label for _, label in training_data])
             classify_email_ml._model = model
@@ -1447,7 +1447,10 @@ def build_investigation_relationship_graph(investigations: list[dict]):
     }
 
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "investigations.db")
+DB_PATH = os.getenv("THREATLOOM_DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "investigations.db",
+)
 
 
 def _evidence_artifact_settings():

@@ -27,12 +27,6 @@ export default function AlertFeed() {
   const seenAlertIds = useRef(new Set<number>());
 
   useEffect(() => {
-    setNotificationPermission(
-      "Notification" in window ? Notification.permission : "unsupported",
-    );
-  }, []);
-
-  useEffect(() => {
     let source: EventSource | undefined;
     let cancelled = false;
 
@@ -132,7 +126,7 @@ export default function AlertFeed() {
         </div>
       </div>
       {notificationPermission === "denied" && (
-        <p className="mt-3 text-xs text-slate-500">Browser alerts are blocked in this browser's site settings.</p>
+        <p className="mt-3 text-xs text-slate-500">Browser alerts are blocked in this browser&apos;s site settings.</p>
       )}
 
       {alerts.length === 0 ? (

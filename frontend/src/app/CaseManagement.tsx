@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 const API = "https://threatloom.onrender.com";
 
@@ -42,12 +42,12 @@ export default function CaseManagement() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const loadCases = async (query = caseSearch) => {
+  const loadCases = useCallback(async (query: string) => {
     const response = await fetch(`${API}/cases?search=${encodeURIComponent(query)}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Could not load cases.");
     setCases(Array.isArray(data.cases) ? data.cases : []);
-  };
+  }, []);
 
   const loadCase = async (id: number) => {
     const response = await fetch(`${API}/cases/${id}`);
@@ -58,15 +58,11 @@ export default function CaseManagement() {
   };
 
   useEffect(() => {
-    loadCases("").catch((reason) => setError(reason.message));
-  }, []);
-
-  useEffect(() => {
     const timer = window.setTimeout(() => {
-      loadCases().catch((reason) => setError(reason.message));
+      loadCases(caseSearch).catch((reason) => setError(reason.message));
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [caseSearch]);
+  }, [caseSearch, loadCases]);
 
   useEffect(() => {
     const timer = window.setTimeout(async () => {
@@ -103,7 +99,7 @@ export default function CaseManagement() {
       setTitle("");
       setDescription("");
       setTags("");
-      await loadCases();
+      await loadCases(caseSearch);
       await loadCase(data.case_id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create case.");
@@ -123,7 +119,7 @@ export default function CaseManagement() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not update case.");
-      await Promise.all([loadCases(), loadCase(selected.case.id)]);
+      await Promise.all([loadCases(caseSearch), loadCase(selected.case.id)]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update case.");
     } finally {
@@ -140,7 +136,7 @@ export default function CaseManagement() {
       if (!response.ok) throw new Error(data.detail || "Could not delete case.");
       setSelected(null);
       setSelectedId(null);
-      await loadCases();
+      await loadCases(caseSearch);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not delete case.");
     } finally {
@@ -159,7 +155,7 @@ export default function CaseManagement() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not add investigation.");
       setInvestigationId("");
-      await Promise.all([loadCases(), loadCase(selected.case.id)]);
+      await Promise.all([loadCases(caseSearch), loadCase(selected.case.id)]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not add investigation.");
     } finally {
@@ -177,7 +173,7 @@ export default function CaseManagement() {
       );
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not remove investigation.");
-      await Promise.all([loadCases(), loadCase(selected.case.id)]);
+      await Promise.all([loadCases(caseSearch), loadCase(selected.case.id)]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not remove investigation.");
     } finally {
