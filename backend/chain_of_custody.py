@@ -74,6 +74,7 @@ def append_evidence_event(
     investigation_id: int,
     event_type: str,
     actor: str = "system",
+    actor_is_authenticated: bool = False,
     notes: str = "",
     source_sha256: str | None = None,
     analysis_text_sha256: str | None = None,
@@ -118,7 +119,7 @@ def append_evidence_event(
             "event_type": event_type,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "actor": actor,
-            "actor_is_authenticated": False,
+            "actor_is_authenticated": actor_is_authenticated,
             "notes": notes,
             "source_sha256": source_sha256,
             "analysis_text_sha256": analysis_text_sha256,
@@ -218,7 +219,10 @@ def get_evidence_bundle(db_path: str, investigation_id: int) -> dict | None:
                 "global_chain_entry_count": len(rows),
                 "first_failed_entry_id": failed_entry_id,
             },
-            "note": "Actor labels are supplied by the caller and are not authenticated by this application.",
+            "note": (
+                "Custody events recorded through the authenticated API have token-verified actor labels. "
+                "Internal system labels and actor tokens do not establish a person's legal identity."
+            ),
         }
     finally:
         connection.close()

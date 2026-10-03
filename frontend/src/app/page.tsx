@@ -271,7 +271,7 @@ export default function Home() {
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(data.error || "File upload failed");
+    throw new Error(data.detail || data.error || "File upload failed");
   }
 
   setThreatScore(data.threat_score);
@@ -354,7 +354,7 @@ setAnalysis(
 
   } catch (error) {
     console.error("Upload analysis failed:", error);
-    setAnalysis("File analysis failed. Please check that the backend is running.");
+    setAnalysis(error instanceof Error ? error.message : "File analysis failed.");
   }
 
   return;
@@ -379,6 +379,9 @@ setAnalysis(
         }),
       });
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Email analysis failed.");
+      }
       setThreatScore(data.threat_score);
       setClassification(data.classification || "");
       setScoreBreakdown(
@@ -409,8 +412,8 @@ setAnalysis(
         `Analysis complete. Threat Score: ${data.threat_score}`
       );
       await loadInvestigations();
-    } catch {
-      setAnalysis("Backend connection failed.");
+    } catch (error) {
+      setAnalysis(error instanceof Error ? error.message : "Backend connection failed.");
     }
   };
 

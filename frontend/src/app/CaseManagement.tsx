@@ -28,6 +28,14 @@ type CaseDetails = {
   investigations: InvestigationRecord[];
 };
 
+type CampaignSuggestion = {
+  investigation_ids: number[];
+  investigations: InvestigationRecord[];
+  shared_indicators: Array<{ type: string; value: string; investigation_count: number }>;
+  signal_strength: string;
+  note: string;
+};
+
 export default function CaseManagement() {
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [selected, setSelected] = useState<CaseDetails | null>(null);
@@ -35,6 +43,7 @@ export default function CaseManagement() {
   const [caseSearch, setCaseSearch] = useState("");
   const [investigationSearch, setInvestigationSearch] = useState("");
   const [investigations, setInvestigations] = useState<InvestigationRecord[]>([]);
+  const [campaignSuggestions, setCampaignSuggestions] = useState<CampaignSuggestion[]>([]);
   const [investigationId, setInvestigationId] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -79,6 +88,60 @@ export default function CaseManagement() {
     }, 180);
     return () => window.clearTimeout(timer);
   }, [investigationSearch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSuggestions = async () => {
+      try {
+        const response = await fetch(`${API}/campaigns/suggestions`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load campaign suggestions.");
+        if (!cancelled) {
+          setCampaignSuggestions(
+            Array.isArray(data.suggestions) ? data.suggestions : [],
+          );
+        }
+      } catch (reason) {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : "Could not load campaign suggestions.");
+        }
+      }
+    };
+    void loadSuggestions();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const createSuggestedCampaign = async (suggestion: CampaignSuggestion) => {
+    setBusy(true);
+    setError("");
+    try {
+      const first = suggestion.investigations[0];
+      const title = `Campaign: ${first?.sender || first?.subject || `investigations ${suggestion.investigation_ids.join(", ")}`}`;
+      const response = await fetch(`${API}/campaigns/from-suggestion`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          investigation_ids: suggestion.investigation_ids,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Could not create campaign case.");
+      await Promise.all([
+        loadCases(caseSearch),
+        loadCase(data.case_id),
+      ]);
+      setCampaignSuggestions((current) =>
+        current.filter((item) => item !== suggestion),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create campaign case.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const createCase = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -191,6 +254,38 @@ export default function CaseManagement() {
       </div>
 
       {error && <p className="mb-4 rounded-lg border border-red-900/50 bg-red-950/20 p-3 text-sm text-red-300">{error}</p>}
+
+      <div className="mb-5 rounded-xl border border-blue-900/60 bg-blue-950/20 p-4">
+        <h4 className="font-semibold text-blue-100">Suggested campaign clusters</h4>
+        <p className="mt-1 text-xs text-slate-400">Suggestions use shared senders, public origin IPs, reply domains, and linked URL domains. Review each cluster before creating a case.</p>
+        {campaignSuggestions.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-500">No multi-investigation clusters found.</p>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {campaignSuggestions.map((suggestion) => (
+              <div key={suggestion.investigation_ids.join("-")} className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-slate-100">{suggestion.investigation_ids.length} related investigations · {suggestion.shared_indicators.length} shared indicators · {suggestion.signal_strength.replaceAll("_", " ")}</p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      {suggestion.shared_indicators.map((item) => `${item.type.replaceAll("_", " ")}: ${item.value} (${item.investigation_count})`).join(" · ")}
+                    </p>
+                    <p className="mt-1 text-[11px] text-slate-500">{suggestion.note}</p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void createSuggestedCampaign(suggestion)}
+                    className="rounded-lg border border-blue-800 px-3 py-2 text-xs font-semibold text-blue-200 hover:bg-blue-950 disabled:opacity-50"
+                  >
+                    Create campaign case
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <form onSubmit={createCase} className="grid gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-4 md:grid-cols-2">
         <input required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Case title" className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm" />

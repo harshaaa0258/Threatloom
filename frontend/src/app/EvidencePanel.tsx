@@ -35,7 +35,7 @@ type EvidenceBundle = {
 export default function EvidencePanel({ investigationId }: { investigationId: number | string }) {
   const [bundle, setBundle] = useState<EvidenceBundle | null>(null);
   const [eventType, setEventType] = useState("reviewed");
-  const [actor, setActor] = useState("");
+  const [actorToken, setActorToken] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -85,12 +85,16 @@ export default function EvidencePanel({ investigationId }: { investigationId: nu
     try {
       const response = await fetch(`${API}/investigations/${investigationId}/evidence/events`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ event_type: eventType, actor, notes }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${actorToken}`,
+        },
+        body: JSON.stringify({ event_type: eventType, notes }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not record custody event.");
       setNotes("");
+      setActorToken("");
       await loadEvidence();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not record custody event.");
@@ -174,9 +178,9 @@ export default function EvidencePanel({ investigationId }: { investigationId: nu
               <option value="transferred">Transferred</option>
               <option value="custody_note">Custody note</option>
             </select>
-            <input required value={actor} onChange={(event) => setActor(event.target.value)} placeholder="Actor label" className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-200" />
+            <input required type="password" autoComplete="off" value={actorToken} onChange={(event) => setActorToken(event.target.value)} placeholder="Authenticated actor token" className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-200" />
             <input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Optional note" className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-200" />
-            <button disabled={loading || !ledgerOk} className="rounded-md border border-slate-700 px-3 py-2 text-xs hover:border-blue-500 disabled:opacity-40">Record event</button>
+            <button disabled={loading || !ledgerOk || !actorToken.trim()} className="rounded-md border border-slate-700 px-3 py-2 text-xs hover:border-blue-500 disabled:opacity-40">Record event</button>
           </form>
           <p className="mt-2 text-[11px] text-slate-500">{bundle.note}</p>
 

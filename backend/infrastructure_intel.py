@@ -28,9 +28,15 @@ def _is_public_ip(value):
 
 def _configured_ip_feed(environment_name):
     addresses = set()
-    raw = os.getenv(environment_name, "").strip()
+    raw_values = [os.getenv(environment_name, "").strip()]
+    feed_path = os.getenv(f"{environment_name}_FILE", "").strip()
+    if feed_path:
+        with open(feed_path, "r", encoding="utf-8") as feed:
+            raw_values.append(feed.read())
+    raw = "\n".join(raw_values)
     for value in re.split(r"[,;\s]+", raw):
-        if not value:
+        value = value.strip()
+        if not value or value.startswith("#"):
             continue
         try:
             addresses.add(str(ipaddress.ip_address(value)))
@@ -235,7 +241,7 @@ def build_infrastructure_intelligence(ip_records):
             if ip in feodo_ips:
                 botnet_sources.append("Feodo Tracker recommended blocklist")
             if ip in configured_botnet_ips:
-                botnet_sources.append("BOTNET_C2_IPS configuration")
+                botnet_sources.append("Operator-maintained botnet IP list")
             indicators.append({
                 "type": "Botnet C2 indicator",
                 "value": ip,
@@ -252,7 +258,7 @@ def build_infrastructure_intelligence(ip_records):
                 "value": ip,
                 "severity": "High",
                 "confidence": "high",
-                "source": "OPEN_RELAY_IPS configuration",
+                "source": "Operator-maintained open relay IP list",
                 "reason": "This address matched the operator-configured open SMTP relay IP list.",
             })
 

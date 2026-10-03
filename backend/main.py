@@ -1,5 +1,5 @@
 from xml.sax.saxutils import escape
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from email import policy
@@ -12,6 +12,7 @@ import csv
 import re
 import base64
 import hashlib
+import hmac
 import json
 import logging
 from dotenv import load_dotenv
@@ -149,9 +150,13 @@ class CaseUpdateRequest(BaseModel):
     tags: list[str] | None = None
 
 
+class CampaignFromSuggestionRequest(BaseModel):
+    title: str
+    investigation_ids: list[int]
+
+
 class EvidenceEventRequest(BaseModel):
     event_type: str
-    actor: str = "unattributed"
     notes: str = ""
 
 
@@ -159,6 +164,10 @@ class PrivacySettingsUpdate(BaseModel):
     retention_days: int | None = None
     mask_email_addresses: bool | None = None
     mask_ip_addresses: bool | None = None
+
+
+class ReviewedTrainingDataError(ValueError):
+    """The classifier is configured to reject synthetic fallback data."""
 
 
 ALERT_STORE = []
@@ -297,7 +306,14 @@ def _load_ml_training_data():
         "warning": "The built-in corpus is synthetic demonstration data. Configure EMAIL_ML_TRAINING_CSV with reviewed labeled examples before relying on classifications.",
     }
     dataset_path = os.getenv("EMAIL_ML_TRAINING_CSV", "").strip()
+    require_reviewed_data = os.getenv(
+        "EMAIL_ML_REQUIRE_REVIEWED_DATA", "false"
+    ).strip().lower() in {"1", "true", "yes"}
     if not dataset_path:
+        if require_reviewed_data:
+            raise ReviewedTrainingDataError(
+                "EMAIL_ML_REQUIRE_REVIEWED_DATA is enabled, but EMAIL_ML_TRAINING_CSV is not configured."
+            )
         return seed_data, seed_metadata
 
     try:
@@ -323,7 +339,11 @@ def _load_ml_training_data():
             "training_samples": len(rows),
             "class_counts": counts,
         }
-    except (OSError, UnicodeError, csv.Error, ValueError):
+    except (OSError, UnicodeError, csv.Error, ValueError) as error:
+        if require_reviewed_data:
+            raise ReviewedTrainingDataError(
+                "The reviewed ML dataset could not be loaded; refusing to fall back to synthetic demo data."
+            ) from error
         return seed_data, {
             **seed_metadata,
             "warning": "Configured training CSV could not be used; the built-in demonstration corpus was used.",
@@ -364,9 +384,32 @@ def classify_email_ml(email_text: str, headers: dict | None = None, urls: list |
     lower = text.lower()
     score = sum(weight for term, weight in suspicious_terms.items() if term in lower)
 
-    if TfidfVectorizer and LogisticRegression and FeatureUnion:
+    require_reviewed_data = os.getenv(
+        "EMAIL_ML_REQUIRE_REVIEWED_DATA", "false"
+    ).strip().lower() in {"1", "true", "yes"}
+    ml_dependencies_available = (
+        TfidfVectorizer is not None
+        and LogisticRegression is not None
+        and FeatureUnion is not None
+        and Pipeline is not None
+    )
+    if require_reviewed_data and not ml_dependencies_available:
+        raise ReviewedTrainingDataError(
+            "Reviewed ML data is required, but scikit-learn is unavailable."
+        )
+
+    if (
+        TfidfVectorizer is not None
+        and LogisticRegression is not None
+        and FeatureUnion is not None
+        and Pipeline is not None
+    ):
         model = getattr(classify_email_ml, "_model", None)
-        if model is None:
+        training_metadata = getattr(classify_email_ml, "_training_metadata", {})
+        if model is None or (
+            require_reviewed_data
+            and training_metadata.get("source") != "configured_csv"
+        ):
             training_data, training_metadata = _load_ml_training_data()
             model = Pipeline([
                 ("features", FeatureUnion([
@@ -1447,6 +1490,143 @@ def build_investigation_relationship_graph(investigations: list[dict]):
     }
 
 
+def build_campaign_suggestions(investigations: list[dict], limit: int = 500):
+    """Suggest clusters only when investigations share strong, explainable indicators."""
+    indicator_members = {}
+    records = {}
+
+    def add_indicator(investigation_id: int, kind: str, value: str):
+        normalized = value.strip().lower().rstrip(".")
+        if normalized:
+            indicator_members.setdefault((kind, normalized), set()).add(investigation_id)
+
+    for row in investigations:
+        try:
+            investigation_id = int(row["id"])
+            result = json.loads(row.get("result_json") or "{}")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(result, dict):
+            continue
+        records[investigation_id] = {
+            "id": investigation_id,
+            "sender": row.get("sender"),
+            "subject": row.get("subject"),
+            "created_at": row.get("created_at"),
+            "classification": row.get("classification"),
+            "threat_score": row.get("threat_score"),
+        }
+
+        headers = result.get("headers")
+        if not isinstance(headers, dict):
+            headers = {}
+        sender_values = getaddresses([str(headers.get("from") or row.get("sender") or "")])
+        for _, address in sender_values:
+            address = address.strip().lower()
+            if re.fullmatch(r"[^\s<>@]+@[^\s<>@]+", address):
+                add_indicator(investigation_id, "sender", address)
+
+        reply_values = getaddresses([str(headers.get("reply-to") or "")])
+        for _, address in reply_values:
+            if "@" in address:
+                add_indicator(investigation_id, "reply_domain", address.rsplit("@", 1)[-1])
+
+        candidate_ips = result.get("ip_addresses")
+        if not isinstance(candidate_ips, list):
+            candidate_ips = []
+        else:
+            candidate_ips = list(candidate_ips)
+        candidate_ips.append(result.get("candidate_origin_ip") or row.get("origin_ip"))
+        for candidate_ip in candidate_ips:
+            try:
+                address = ipaddress.ip_address(str(candidate_ip))
+            except ValueError:
+                continue
+            if address.is_global:
+                add_indicator(investigation_id, "origin_ip", str(address))
+
+        domains = result.get("url_domains")
+        if not isinstance(domains, list):
+            domains = []
+        raw_urls = result.get("urls")
+        if not isinstance(raw_urls, list):
+            raw_urls = []
+        for item in raw_urls:
+            raw_url = item.get("url") if isinstance(item, dict) else item
+            try:
+                host = urlsplit(str(raw_url) if "://" in str(raw_url) else f"//{raw_url}").hostname
+            except ValueError:
+                host = None
+            if host:
+                domains.append(host)
+        for domain in domains:
+            if isinstance(domain, str) and re.fullmatch(r"[a-z0-9.-]+", domain.lower().rstrip(".")):
+                add_indicator(investigation_id, "url_domain", domain)
+
+    shared_by_pair = {}
+    for (kind, value), members in indicator_members.items():
+        if len(members) < 2:
+            continue
+        ordered_members = sorted(members)
+        for index, left in enumerate(ordered_members):
+            for right in ordered_members[index + 1:]:
+                shared_by_pair.setdefault((left, right), []).append({
+                    "type": kind,
+                    "value": value,
+                })
+
+    parent = {investigation_id: investigation_id for investigation_id in records}
+
+    def find(investigation_id: int) -> int:
+        while parent[investigation_id] != investigation_id:
+            parent[investigation_id] = parent[parent[investigation_id]]
+            investigation_id = parent[investigation_id]
+        return investigation_id
+
+    for (left, right), shared in shared_by_pair.items():
+        strong_match = any(
+            indicator["type"] in {"sender", "origin_ip"}
+            for indicator in shared
+        )
+        if strong_match or len(shared) >= 2:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+    groups = {}
+    for investigation_id in records:
+        groups.setdefault(find(investigation_id), []).append(investigation_id)
+
+    suggestions = []
+    for member_ids in groups.values():
+        if len(member_ids) < 2:
+            continue
+        member_set = set(member_ids)
+        shared_indicators = [
+            {"type": kind, "value": value, "investigation_count": len(members & member_set)}
+            for (kind, value), members in indicator_members.items()
+            if len(members & member_set) > 1
+        ]
+        shared_indicators.sort(key=lambda item: (-item["investigation_count"], item["type"], item["value"]))
+        suggestions.append({
+            "investigation_ids": sorted(member_ids),
+            "investigations": [records[item] for item in sorted(member_ids)],
+            "shared_indicators": shared_indicators,
+            "signal_strength": "multiple_indicators" if len(shared_indicators) >= 2 else "single_strong_indicator",
+            "note": "Heuristic campaign suggestion based on shared indicators; verify the evidence before grouping.",
+        })
+
+    suggestions.sort(
+        key=lambda item: (
+            -len(item["shared_indicators"]),
+            -len(item["investigation_ids"]),
+            item["investigation_ids"][0],
+        )
+    )
+    return suggestions[:max(1, min(limit, 100))]
+
+
 DB_PATH = os.getenv("THREATLOOM_DB_PATH") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "investigations.db",
@@ -2412,7 +2592,10 @@ def _analyze_email(
     # AI-assisted NLP analysis is kept separate from the existing evidence score
     # so the same language indicators are not double-counted.
     nlp_analysis = analyze_email_nlp(email_text, headers, urls)
-    ml_analysis = classify_email_ml(email_text, headers, urls)
+    try:
+        ml_analysis = classify_email_ml(email_text, headers, urls)
+    except ReviewedTrainingDataError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     resolve_shorteners = (
         allow_external_lookups
         and os.getenv("ENABLE_SAFE_SHORTENER_RESOLUTION", "false").strip().lower() in {"1", "true", "yes"}
@@ -2694,6 +2877,81 @@ def list_cases(search: str = ""):
     return {"cases": _privacy_response([_case_record(row) for row in rows])}
 
 
+@app.get("/campaigns/suggestions")
+def list_campaign_suggestions(limit: int = 500):
+    limit = max(2, min(limit, 1000))
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute("""
+        SELECT id, created_at, sender, subject, threat_score, classification, origin_ip, result_json
+        FROM investigations
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    connection.close()
+    suggestions = build_campaign_suggestions([dict(row) for row in rows])
+    return _privacy_response({"suggestions": suggestions, "investigations_scanned": len(rows)})
+
+
+@app.post("/campaigns/from-suggestion")
+def create_case_from_campaign_suggestion(request: CampaignFromSuggestionRequest):
+    title = request.title.strip()
+    investigation_ids = list(dict.fromkeys(request.investigation_ids))
+    if not title:
+        raise HTTPException(status_code=400, detail="Campaign case title is required.")
+    if len(investigation_ids) < 2 or len(investigation_ids) > 100:
+        raise HTTPException(status_code=400, detail="Select between 2 and 100 investigations.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    connection = sqlite3.connect(DB_PATH, timeout=15)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        placeholders = ",".join("?" for _ in investigation_ids)
+        rows = connection.execute(
+            f"""
+            SELECT id, created_at, sender, subject, threat_score, classification,
+                   origin_ip, result_json
+            FROM investigations WHERE id IN ({placeholders})
+            """,
+            investigation_ids,
+        ).fetchall()
+        found_ids = {row["id"] for row in rows}
+        if found_ids != set(investigation_ids):
+            raise HTTPException(status_code=404, detail="One or more investigations no longer exist.")
+        if not any(
+            set(suggestion["investigation_ids"]) == set(investigation_ids)
+            for suggestion in build_campaign_suggestions([dict(row) for row in rows])
+        ):
+            raise HTTPException(status_code=409, detail="The selected investigations do not form a current campaign suggestion.")
+        cursor = connection.execute(
+            "INSERT INTO cases (title, description, tags_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                title,
+                "Created from a reviewed heuristic campaign suggestion.",
+                json.dumps(["campaign-suggestion"]),
+                now,
+                now,
+            ),
+        )
+        case_id = cursor.lastrowid
+        connection.executemany(
+            "INSERT INTO case_investigations (case_id, investigation_id, added_at) VALUES (?, ?, ?)",
+            [(case_id, investigation_id, now) for investigation_id in investigation_ids],
+        )
+        connection.commit()
+    except HTTPException:
+        connection.rollback()
+        raise
+    except sqlite3.Error as error:
+        connection.rollback()
+        logging.exception("Could not create campaign case from suggestion.")
+        raise HTTPException(status_code=500, detail="Could not create the campaign case.") from error
+    finally:
+        connection.close()
+    return {"success": True, "case_id": case_id, "investigation_ids": investigation_ids}
+
+
 @app.post("/cases")
 def create_case(request: CaseCreateRequest):
     title = request.title.strip()
@@ -2950,16 +3208,65 @@ def get_investigation_evidence(investigation_id: int):
     return _privacy_response(bundle)
 
 
+def authenticate_evidence_actor(authorization: str | None) -> str:
+    configured_tokens = os.getenv("EVIDENCE_ACTOR_TOKENS", "").strip()
+    if not configured_tokens:
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence event recording is disabled until EVIDENCE_ACTOR_TOKENS is configured.",
+        )
+    try:
+        actor_tokens = json.loads(configured_tokens)
+    except json.JSONDecodeError as error:
+        logging.error("EVIDENCE_ACTOR_TOKENS must contain a JSON object.")
+        raise HTTPException(status_code=503, detail="Evidence actor authentication is misconfigured.") from error
+    if (
+        not isinstance(actor_tokens, dict)
+        or not actor_tokens
+        or any(
+            not isinstance(actor, str)
+            or not actor.strip()
+            or actor != actor.strip()
+            or len(actor) > 120
+            or not isinstance(token, str)
+            or len(token) < 32
+            or len(token) > 4096
+            or not token.isascii()
+            for actor, token in actor_tokens.items()
+        )
+        or len(set(actor_tokens.values())) != len(actor_tokens)
+    ):
+        logging.error(
+            "EVIDENCE_ACTOR_TOKENS must map actor names to unique ASCII tokens between 32 and 4096 characters."
+        )
+        raise HTTPException(status_code=503, detail="Evidence actor authentication is misconfigured.")
+
+    scheme, separator, supplied_token = (authorization or "").partition(" ")
+    if not separator or scheme.lower() != "bearer" or not supplied_token:
+        raise HTTPException(status_code=401, detail="A valid bearer token is required to record custody events.")
+    if not supplied_token.isascii():
+        raise HTTPException(status_code=401, detail="The evidence actor token is invalid.")
+    matched_actor = None
+    for actor, token in actor_tokens.items():
+        if hmac.compare_digest(supplied_token, token):
+            matched_actor = actor
+    if matched_actor is None:
+        raise HTTPException(status_code=401, detail="The evidence actor token is invalid.")
+    return matched_actor.strip()
+
+
 @app.post("/investigations/{investigation_id}/evidence/events")
-def record_investigation_evidence_event(investigation_id: int, request: EvidenceEventRequest):
+def record_investigation_evidence_event(
+    investigation_id: int,
+    request: EvidenceEventRequest,
+    authorization: str | None = Header(default=None),
+):
     allowed_events = {"reviewed", "transferred", "custody_note"}
     event_type = request.event_type.strip().lower()
-    actor = request.actor.strip()
     notes = request.notes.strip()
+    actor = authenticate_evidence_actor(authorization)
     if event_type not in allowed_events:
         raise HTTPException(status_code=400, detail="Event type must be reviewed, transferred, or custody_note.")
-    if not actor or len(actor) > 120:
-        raise HTTPException(status_code=400, detail="Actor label must contain 1 to 120 characters.")
     if len(notes) > 2000:
         raise HTTPException(status_code=400, detail="Event notes cannot exceed 2000 characters.")
     connection = sqlite3.connect(DB_PATH)
@@ -2973,6 +3280,7 @@ def record_investigation_evidence_event(investigation_id: int, request: Evidence
             investigation_id,
             event_type,
             actor=actor,
+            actor_is_authenticated=True,
             notes=notes,
         )
     except ValueError as error:
