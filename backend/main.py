@@ -7,9 +7,9 @@ from email.parser import BytesParser
 import dns.resolver
 import requests
 import ipaddress
-import spf
 import re
 import base64
+import json
 from dotenv import load_dotenv
 import os
 import sqlite3
@@ -22,6 +22,21 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+
+try:
+    import spf
+except ImportError:  # pragma: no cover - optional runtime dependency in some environments
+    spf = None
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+except ImportError:  # pragma: no cover - optional ML dependency until installed
+    TfidfVectorizer = None
+    LogisticRegression = None
+    Pipeline = None
+
 load_dotenv()
 
 VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY")
@@ -41,6 +56,113 @@ app.add_middleware(
 
 class EmailRequest(BaseModel):
     email: str
+
+
+ALERT_STORE = []
+_ML_MODEL = None
+
+
+def push_alert(event_type: str, summary: str, severity: str, payload: dict | None = None):
+    """Store a high-risk email alert so the app exposes a lightweight real-time feed."""
+    alert = {
+        "id": len(ALERT_STORE) + 1,
+        "type": event_type,
+        "summary": summary,
+        "severity": severity.lower(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "payload": payload or {},
+    }
+    ALERT_STORE.append(alert)
+    return alert
+
+
+def get_alerts(limit: int = 20):
+    return list(reversed(ALERT_STORE[-limit:]))
+
+
+def _build_ml_training_data():
+    return [
+        ("Hi team, thanks for the update. The project is moving ahead as planned.", "legitimate"),
+        ("Good afternoon, I hope you are well. Please review the attached report at your convenience.", "legitimate"),
+        ("Urgent security alert: verify your password now to avoid account suspension.", "phishing"),
+        ("Action required: your account will be locked unless you sign in and confirm your credentials immediately.", "phishing"),
+        ("This is a final warning. Click here to verify your identity before the deadline today.", "phishing"),
+        ("Payment required immediately. We need the invoice confirmation and bank account details before noon.", "fraud"),
+        ("Your mailbox has suspicious activity. Click the secure login link and update your username and password.", "phishing"),
+        ("Please review the wire transfer change and share your verification details to process the payment.", "fraud"),
+        ("The system detected unusual activity, please login to secure your account before it is restricted.", "suspicious"),
+        ("Need to confirm your information. Reply to this message with your login details to continue.", "suspicious"),
+    ]
+
+
+def classify_email_ml(email_text: str, headers: dict | None = None, urls: list | None = None):
+    """Lightweight ML classifier for email threat labels using TF-IDF + logistic regression."""
+    text = (email_text or "").strip()
+    if not text:
+        return {"model": "TF-IDF logistic regression", "classification": "legitimate", "confidence": 0.0, "probabilities": {}}
+
+    suspicious_terms = {
+        "urgent": 2,
+        "verify": 2,
+        "password": 3,
+        "immediately": 2,
+        "account": 1,
+        "secure": 1,
+        "login": 2,
+        "click": 2,
+        "suspicious": 2,
+        "invoice": 2,
+        "wire": 2,
+        "bank": 2,
+        "payment": 2,
+    }
+
+    lower = text.lower()
+    score = sum(weight for term, weight in suspicious_terms.items() if term in lower)
+
+    if TfidfVectorizer and LogisticRegression:
+        model = getattr(classify_email_ml, "_model", None)
+        if model is None:
+            training_data = _build_ml_training_data()
+            model = Pipeline([
+                ("tfidf", TfidfVectorizer(stop_words="english", ngram_range=(1, 2))),
+                ("clf", LogisticRegression(max_iter=1000, class_weight="balanced", solver="liblinear")),
+            ])
+            model.fit([sample for sample, _ in training_data], [label for _, label in training_data])
+            classify_email_ml._model = model
+
+        prediction = model.predict([text])[0]
+        probabilities = model.predict_proba([text])[0]
+        confidence = float(max(probabilities))
+        label = str(prediction).lower()
+        if label not in {"legitimate", "suspicious", "phishing", "fraud"}:
+            label = "suspicious"
+        return {
+            "model": "TF-IDF logistic regression",
+            "classification": label,
+            "confidence": round(confidence, 4),
+            "probabilities": {cls: round(float(prob), 4) for cls, prob in zip(model.classes_, probabilities)},
+        }
+
+    if score >= 8 or "verify your password" in lower or "account suspended" in lower:
+        classification = "phishing"
+        confidence = 0.9
+    elif score >= 4:
+        classification = "suspicious"
+        confidence = 0.74
+    elif "invoice" in lower or "payment" in lower:
+        classification = "fraud"
+        confidence = 0.7
+    else:
+        classification = "legitimate"
+        confidence = 0.65
+
+    return {
+        "model": "rule-based ML fallback",
+        "classification": classification,
+        "confidence": round(confidence, 4),
+        "probabilities": {"legitimate": 0.15, "suspicious": 0.3, "phishing": 0.55, "fraud": 0.15},
+    }
 
 
 def analyze_email_nlp(email_text: str, headers: dict, urls: list):
@@ -930,6 +1052,21 @@ def health():
     return {"status": "healthy"}
 
 
+@app.get("/alerts")
+def alerts():
+    return {"alerts": get_alerts()}
+
+
+@app.get("/alerts/stream")
+def alerts_stream():
+    def iter_alerts():
+        yield "data: {\"status\":\"connected\"}\n\n"
+        for alert in get_alerts():
+            yield f"data: {json.dumps(alert)}\n\n"
+
+    return StreamingResponse(iter_alerts(), media_type="text/event-stream")
+
+
 @app.post("/analyze")
 def analyze_email(request: EmailRequest):
     email_text = request.email
@@ -1534,6 +1671,7 @@ def analyze_email(request: EmailRequest):
     # AI-assisted NLP analysis is kept separate from the existing evidence score
     # so the same language indicators are not double-counted.
     nlp_analysis = analyze_email_nlp(email_text, headers, urls)
+    ml_analysis = classify_email_ml(email_text, headers, urls)
 
     score = min(score, 100)
 
@@ -1557,6 +1695,12 @@ def analyze_email(request: EmailRequest):
         classification = "Phishing"
     elif score < 25:
         classification = "Low Risk"
+
+    if ml_analysis.get("classification") in {"phishing", "fraud", "suspicious"}:
+        classification = ml_analysis["classification"].title()
+    elif ml_analysis.get("classification") == "legitimate":
+        classification = "Low Risk"
+
     if not findings:
         findings.append("No obvious suspicious indicators detected.")
 
@@ -1579,6 +1723,7 @@ def analyze_email(request: EmailRequest):
         "url_intelligence": url_intelligence,
         "threat_intelligence": threat_intelligence,
         "nlp_analysis": nlp_analysis,
+        "ml_classifier": ml_analysis,
         "received_headers": received_headers,
         "relay_path":relay_path,
         "ip_addresses": ip_addresses,
@@ -1594,6 +1739,15 @@ def analyze_email(request: EmailRequest):
     }
 
     result["recommendations"] = build_recommendations(result)
+
+    if score >= 60 or ml_analysis.get("classification") in {"phishing", "fraud", "suspicious"}:
+        alert = push_alert(
+            "email_analysis",
+            f"High-risk {ml_analysis.get('classification', 'email')} threat detected",
+            "high" if score >= 60 else "medium",
+            {"score": score, "classification": classification, "risk_level": risk_level},
+        )
+        result["alert"] = alert
 
     investigation_id = save_investigation(result)
     result["investigation_id"] = investigation_id
