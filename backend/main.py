@@ -37,6 +37,11 @@ except ImportError:
     from relay_forensics import analyze_relay_path
 
 try:
+    from .message_patterns import analyze_bec_patterns, analyze_obfuscated_urls
+except ImportError:
+    from message_patterns import analyze_bec_patterns, analyze_obfuscated_urls
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -1901,6 +1906,22 @@ def analyze_email(request: EmailRequest):
     # so the same language indicators are not double-counted.
     nlp_analysis = analyze_email_nlp(email_text, headers, urls)
     ml_analysis = classify_email_ml(email_text, headers, urls)
+    url_obfuscation_analysis = analyze_obfuscated_urls(urls, email_text)
+    bec_analysis = analyze_bec_patterns(
+        email_text, headers, url_obfuscation_analysis, urls
+    )
+
+    for item in url_obfuscation_analysis["urls"]:
+        signal_names = ", ".join(signal["type"].replace("_", " ") for signal in item["signals"])
+        findings.append(f"URL camouflage indicator ({signal_names}): {item['url']}")
+    for signal in url_obfuscation_analysis["link_text_signals"]:
+        findings.append(f"URL presentation mismatch: {signal['detail']}")
+    for resolution in url_obfuscation_analysis["shortener_resolution"]["results"]:
+        destination = resolution.get("destination")
+        if destination and destination != resolution.get("url"):
+            findings.append(f"Shortened URL redirect destination observed: {destination}")
+    for signal in bec_analysis["signals"]:
+        findings.append(f"Possible BEC pattern ({signal['type'].replace('_', ' ')}): {signal['detail']}")
 
     score = min(score, 100)
 
@@ -1958,6 +1979,8 @@ def analyze_email(request: EmailRequest):
         "infrastructure_intelligence": infrastructure_intelligence,
         "nlp_analysis": nlp_analysis,
         "ml_classifier": ml_analysis,
+        "bec_analysis": bec_analysis,
+        "url_obfuscation_analysis": url_obfuscation_analysis,
         "received_headers": received_headers,
         "relay_path":relay_path,
         "relay_path_analysis": relay_path_analysis,
