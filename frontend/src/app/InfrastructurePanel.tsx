@@ -18,6 +18,7 @@ const indicatorTypes = new Set([
   "VPN / proxy infrastructure",
   "Cloud / hosted infrastructure",
   "Reported abusive IP",
+  "Botnet C2 indicator",
   "Configured botnet C2 indicator",
   "Configured open relay indicator",
   "Verified phishing URL",
@@ -64,6 +65,7 @@ export default function InfrastructurePanel({ data }: Props) {
     ["VirusTotal", threatSourceStatus.virustotal],
     ["PhishTank", threatSourceStatus.phishtank],
     ["Botnet C2 list", sourceStatus.botnet_c2_list],
+    ["Feodo Tracker", sourceStatus.feodo_tracker_botnet_c2],
     ["Open relay list", sourceStatus.open_relay_list],
   ];
 
@@ -129,7 +131,7 @@ export default function InfrastructurePanel({ data }: Props) {
         </div>
       )}
       <p className="mt-4 text-xs text-slate-500">
-        VPN/proxy and hosting labels are contextual signals. Botnet C2 and open relay matching require operator-maintained IP lists.
+        VPN/proxy and hosting labels are contextual signals. Botnet C2 matches use Feodo Tracker and any configured IP list; open relay matching requires an operator-maintained list.
       </p>
     </section>
   );

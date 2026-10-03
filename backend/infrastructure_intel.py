@@ -10,8 +10,11 @@ import requests
 
 
 TOR_EXIT_LIST_URL = "https://check.torproject.org/torbulkexitlist"
+FEODO_C2_LIST_URL = "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt"
 TOR_EXIT_CACHE = {"addresses": set(), "expires_at": 0.0, "status": "not_loaded"}
 TOR_EXIT_CACHE_LOCK = threading.Lock()
+FEODO_C2_CACHE = {"addresses": set(), "expires_at": 0.0, "status": "not_loaded"}
+FEODO_C2_CACHE_LOCK = threading.Lock()
 ABUSEIPDB_CACHE = {}
 ABUSEIPDB_CACHE_LOCK = threading.Lock()
 
@@ -70,6 +73,50 @@ def _get_tor_exit_addresses():
         return set(TOR_EXIT_CACHE["addresses"]), TOR_EXIT_CACHE["status"]
 
 
+def _get_feodo_c2_addresses():
+    """Fetch Feodo Tracker's recommended active/recent C2 list and cache it for 15 minutes."""
+    now = time.monotonic()
+    with FEODO_C2_CACHE_LOCK:
+        if FEODO_C2_CACHE["expires_at"] > now:
+            return set(FEODO_C2_CACHE["addresses"]), FEODO_C2_CACHE["status"]
+
+        try:
+            response = requests.get(
+                FEODO_C2_LIST_URL,
+                headers={"User-Agent": "Threatloom/1.0 (SIH email threat analysis)"},
+                timeout=6,
+            )
+            response.raise_for_status()
+            text = response.text
+            if "Feodo Tracker" not in text or "DstIP" not in text:
+                raise ValueError("Feodo Tracker blocklist format was not recognized")
+
+            addresses = set()
+            for line in text.splitlines():
+                value = line.strip()
+                if not value or value.startswith("#"):
+                    continue
+                try:
+                    address = ipaddress.ip_address(value)
+                    if address.is_global:
+                        addresses.add(str(address))
+                except ValueError:
+                    continue
+
+            FEODO_C2_CACHE.update({
+                "addresses": addresses,
+                "expires_at": now + 900,
+                "status": "available",
+            })
+        except Exception:
+            FEODO_C2_CACHE["expires_at"] = now + 300
+            FEODO_C2_CACHE["status"] = (
+                "stale_cache" if FEODO_C2_CACHE["addresses"] else "unavailable"
+            )
+
+        return set(FEODO_C2_CACHE["addresses"]), FEODO_C2_CACHE["status"]
+
+
 def _check_abuseipdb(ip):
     api_key = os.getenv("ABUSEIPDB_API_KEY")
     if not api_key:
@@ -117,7 +164,12 @@ def build_infrastructure_intelligence(ip_records):
     # when a separate provider misses or mislabels a Tor exit address.
     tor_candidates = bool(records)
     tor_addresses, tor_status = _get_tor_exit_addresses() if tor_candidates else (set(), "not_needed")
-    botnet_ips = _configured_ip_feed("BOTNET_C2_IPS")
+    configured_botnet_ips = _configured_ip_feed("BOTNET_C2_IPS")
+    feodo_candidates = bool(records)
+    feodo_ips, feodo_status = (
+        _get_feodo_c2_addresses() if feodo_candidates else (set(), "not_needed")
+    )
+    botnet_ips = configured_botnet_ips | feodo_ips
     open_relay_ips = _configured_ip_feed("OPEN_RELAY_IPS")
     indicators = []
     seen = {"tor": set(), "proxy": set(), "hosting": set(), "abuse": set(), "botnet": set(), "open_relay": set()}
@@ -179,13 +231,18 @@ def build_infrastructure_intelligence(ip_records):
 
         if ip in botnet_ips:
             seen["botnet"].add(ip)
+            botnet_sources = []
+            if ip in feodo_ips:
+                botnet_sources.append("Feodo Tracker recommended blocklist")
+            if ip in configured_botnet_ips:
+                botnet_sources.append("BOTNET_C2_IPS configuration")
             indicators.append({
-                "type": "Configured botnet C2 indicator",
+                "type": "Botnet C2 indicator",
                 "value": ip,
                 "severity": "High",
                 "confidence": "high",
-                "source": "BOTNET_C2_IPS configuration",
-                "reason": "This address matched the operator-configured botnet command-and-control IP list.",
+                "source": ", ".join(botnet_sources),
+                "reason": "This address matched a botnet command-and-control IP list. The match is an infrastructure signal, not proof of sender attribution.",
             })
 
         if ip in open_relay_ips:
@@ -221,13 +278,14 @@ def build_infrastructure_intelligence(ip_records):
             "ip_api_proxy_hosting": "available" if fields_available else "unavailable",
             "tor_project_exit_list": tor_status,
             "abuseipdb": abuse_status,
-            "botnet_c2_list": "configured" if botnet_ips else "not_configured",
+            "botnet_c2_list": "configured" if configured_botnet_ips else "not_configured",
+            "feodo_tracker_botnet_c2": feodo_status,
             "open_relay_list": "configured" if open_relay_ips else "not_configured",
         },
         "indicators": indicators,
         "note": (
             "VPN/proxy and hosting labels describe infrastructure type, not intent. "
-            "Botnet C2 and open-relay matches are checked only when the corresponding "
-            "operator-maintained IP lists are configured."
+            "Botnet C2 matches include the Feodo Tracker recommended list and any "
+            "operator-maintained IP list; open-relay matches use the operator-maintained list."
         ),
     }
