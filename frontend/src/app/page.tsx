@@ -3,6 +3,7 @@ import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 import RelationshipGraph from "./RelationshipGraph";
 import InfrastructurePanel from "./InfrastructurePanel";
+import CaseManagement from "./CaseManagement";
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -1321,6 +1322,7 @@ role:
 </div>
 
         <RelationshipGraph />
+        <CaseManagement />
         </div>
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">

@@ -1,5 +1,5 @@
 from xml.sax.saxutils import escape
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from email import policy
@@ -69,6 +69,19 @@ app.add_middleware(
 
 class EmailRequest(BaseModel):
     email: str
+
+
+class CaseCreateRequest(BaseModel):
+    title: str
+    description: str = ""
+    tags: list[str] | None = None
+
+
+class CaseUpdateRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    status: str | None = None
+    tags: list[str] | None = None
 
 
 ALERT_STORE = []
@@ -1168,6 +1181,32 @@ def init_database():
             result_json TEXT NOT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS case_investigations (
+            case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (case_id, investigation_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS remove_case_memberships_after_investigation_delete
+        AFTER DELETE ON investigations
+        BEGIN
+            DELETE FROM case_investigations WHERE investigation_id = OLD.id;
+        END
+    """)
     connection.commit()
     connection.close()
 
@@ -1955,17 +1994,179 @@ def analyze_email(request: EmailRequest):
 
 
 @app.get("/investigations")
-def list_investigations():
+def list_investigations(search: str = "", limit: int = 500):
+    limit = max(1, min(limit, 1000))
+    search_pattern = f"%{search.strip()}%"
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     rows = connection.execute("""
         SELECT id, created_at, sender, recipient, subject,
                threat_score, risk_level, classification, origin_ip
         FROM investigations
+        WHERE ? = '' OR sender LIKE ? OR recipient LIKE ? OR subject LIKE ?
+              OR origin_ip LIKE ? OR risk_level LIKE ? OR classification LIKE ?
         ORDER BY id DESC
-    """).fetchall()
+        LIMIT ?
+    """, (search.strip(), search_pattern, search_pattern, search_pattern,
+          search_pattern, search_pattern, search_pattern, limit)).fetchall()
     connection.close()
     return {"investigations": [dict(row) for row in rows]}
+
+
+def _case_record(row):
+    record = dict(row)
+    record["tags"] = json.loads(record.pop("tags_json", "[]"))
+    return record
+
+
+@app.get("/cases")
+def list_cases(search: str = ""):
+    search = search.strip()
+    pattern = f"%{search}%"
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute("""
+        SELECT c.*, COUNT(ci.investigation_id) AS investigation_count
+        FROM cases c
+        LEFT JOIN case_investigations ci ON ci.case_id = c.id
+        WHERE ? = '' OR c.title LIKE ? OR c.description LIKE ? OR c.tags_json LIKE ?
+        GROUP BY c.id
+        ORDER BY c.updated_at DESC, c.id DESC
+    """, (search, pattern, pattern, pattern)).fetchall()
+    connection.close()
+    return {"cases": [_case_record(row) for row in rows]}
+
+
+@app.post("/cases")
+def create_case(request: CaseCreateRequest):
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Case title is required.")
+    tags = list(dict.fromkeys(tag.strip() for tag in (request.tags or []) if tag.strip()))
+    now = datetime.now(timezone.utc).isoformat()
+    connection = sqlite3.connect(DB_PATH)
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO cases (title, description, tags_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (title, request.description.strip(), json.dumps(tags), now, now),
+    )
+    case_id = cursor.lastrowid
+    connection.commit()
+    connection.close()
+    return {"success": True, "case_id": case_id}
+
+
+@app.get("/cases/{case_id}")
+def get_case(case_id: int):
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    case = connection.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+    if case is None:
+        connection.close()
+        raise HTTPException(status_code=404, detail="Case not found.")
+    investigations = connection.execute("""
+        SELECT i.id, i.created_at, i.sender, i.recipient, i.subject,
+               i.threat_score, i.risk_level, i.classification, i.origin_ip,
+               ci.added_at
+        FROM case_investigations ci
+        JOIN investigations i ON i.id = ci.investigation_id
+        WHERE ci.case_id = ?
+        ORDER BY i.created_at DESC, i.id DESC
+    """, (case_id,)).fetchall()
+    connection.close()
+    return {"case": _case_record(case), "investigations": [dict(row) for row in investigations]}
+
+
+@app.patch("/cases/{case_id}")
+def update_case(case_id: int, request: CaseUpdateRequest):
+    changes = request.dict(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="Provide at least one case field to update.")
+    if "title" in changes:
+        changes["title"] = (changes["title"] or "").strip()
+        if not changes["title"]:
+            raise HTTPException(status_code=400, detail="Case title cannot be empty.")
+    if "description" in changes:
+        changes["description"] = (changes["description"] or "").strip()
+    if "status" in changes:
+        changes["status"] = (changes["status"] or "").lower()
+        if changes["status"] not in {"open", "closed"}:
+            raise HTTPException(status_code=400, detail="Case status must be open or closed.")
+    if "tags" in changes:
+        changes["tags_json"] = json.dumps(list(dict.fromkeys(
+            tag.strip() for tag in (changes.pop("tags") or []) if tag.strip()
+        )))
+    assignments = [f"{field} = ?" for field in changes]
+    values = list(changes.values())
+    assignments.append("updated_at = ?")
+    values.append(datetime.now(timezone.utc).isoformat())
+    values.append(case_id)
+    connection = sqlite3.connect(DB_PATH)
+    cursor = connection.cursor()
+    cursor.execute(f"UPDATE cases SET {', '.join(assignments)} WHERE id = ?", values)
+    updated = cursor.rowcount
+    connection.commit()
+    connection.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return {"success": True, "case_id": case_id}
+
+
+@app.put("/cases/{case_id}/investigations/{investigation_id}")
+def add_investigation_to_case(case_id: int, investigation_id: int):
+    now = datetime.now(timezone.utc).isoformat()
+    connection = sqlite3.connect(DB_PATH)
+    cursor = connection.cursor()
+    case_exists = cursor.execute("SELECT 1 FROM cases WHERE id = ?", (case_id,)).fetchone()
+    investigation_exists = cursor.execute(
+        "SELECT 1 FROM investigations WHERE id = ?", (investigation_id,)
+    ).fetchone()
+    if case_exists is None or investigation_exists is None:
+        connection.close()
+        raise HTTPException(status_code=404, detail="Case or investigation not found.")
+    cursor.execute(
+        "INSERT OR IGNORE INTO case_investigations (case_id, investigation_id, added_at) VALUES (?, ?, ?)",
+        (case_id, investigation_id, now),
+    )
+    cursor.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case_id))
+    connection.commit()
+    connection.close()
+    return {"success": True, "case_id": case_id, "investigation_id": investigation_id}
+
+
+@app.delete("/cases/{case_id}/investigations/{investigation_id}")
+def remove_investigation_from_case(case_id: int, investigation_id: int):
+    connection = sqlite3.connect(DB_PATH)
+    cursor = connection.cursor()
+    cursor.execute(
+        "DELETE FROM case_investigations WHERE case_id = ? AND investigation_id = ?",
+        (case_id, investigation_id),
+    )
+    removed = cursor.rowcount
+    if removed:
+        cursor.execute(
+            "UPDATE cases SET updated_at = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), case_id),
+        )
+    connection.commit()
+    connection.close()
+    if not removed:
+        raise HTTPException(status_code=404, detail="Case membership not found.")
+    return {"success": True, "case_id": case_id, "investigation_id": investigation_id}
+
+
+@app.delete("/cases/{case_id}")
+def delete_case(case_id: int):
+    connection = sqlite3.connect(DB_PATH)
+    cursor = connection.cursor()
+    cursor.execute("DELETE FROM case_investigations WHERE case_id = ?", (case_id,))
+    cursor.execute("DELETE FROM cases WHERE id = ?", (case_id,))
+    deleted = cursor.rowcount
+    connection.commit()
+    connection.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    return {"success": True, "case_id": case_id}
 
 
 @app.get("/investigations/graph")
