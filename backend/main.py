@@ -1,5 +1,5 @@
 from xml.sax.saxutils import escape
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from email import policy
@@ -153,13 +153,23 @@ _ML_MODEL = None
 
 
 def push_alert(event_type: str, summary: str, severity: str, payload: dict | None = None):
-    """Store a high-risk email alert so the app exposes a lightweight real-time feed."""
+    """Persist an alert for the REST feed and any connected SSE clients."""
+    created_at = datetime.now(timezone.utc).isoformat()
+    connection = sqlite3.connect(DB_PATH, timeout=10)
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO alert_events (created_at, event_type, summary, severity, payload_json) VALUES (?, ?, ?, ?, ?)",
+        (created_at, event_type, summary, severity.lower(), json.dumps(payload or {}, default=str)),
+    )
+    alert_id = cursor.lastrowid
+    connection.commit()
+    connection.close()
     alert = {
-        "id": len(ALERT_STORE) + 1,
+        "id": alert_id,
         "type": event_type,
         "summary": summary,
         "severity": severity.lower(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at,
         "payload": payload or {},
     }
     ALERT_STORE.append(alert)
@@ -167,7 +177,45 @@ def push_alert(event_type: str, summary: str, severity: str, payload: dict | Non
 
 
 def get_alerts(limit: int = 20):
-    return list(reversed(ALERT_STORE[-limit:]))
+    limit = max(1, min(limit, 100))
+    connection = sqlite3.connect(DB_PATH)
+    rows = connection.execute(
+        "SELECT id, created_at, event_type, summary, severity, payload_json FROM alert_events ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    connection.close()
+    return [
+        {
+            "id": row[0],
+            "created_at": row[1],
+            "type": row[2],
+            "summary": row[3],
+            "severity": row[4],
+            "payload": json.loads(row[5] or "{}"),
+        }
+        for row in rows
+    ]
+
+
+def get_alerts_after(last_id: int, limit: int = 100):
+    limit = max(1, min(limit, 500))
+    connection = sqlite3.connect(DB_PATH)
+    rows = connection.execute(
+        "SELECT id, created_at, event_type, summary, severity, payload_json FROM alert_events WHERE id > ? ORDER BY id ASC LIMIT ?",
+        (last_id, limit),
+    ).fetchall()
+    connection.close()
+    return [
+        {
+            "id": row[0],
+            "created_at": row[1],
+            "type": row[2],
+            "summary": row[3],
+            "severity": row[4],
+            "payload": json.loads(row[5] or "{}"),
+        }
+        for row in rows
+    ]
 
 
 def _build_ml_training_data():
@@ -1301,6 +1349,16 @@ def init_database():
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS alert_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS cases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -1498,13 +1556,32 @@ def alerts():
 
 
 @app.get("/alerts/stream")
-def alerts_stream():
-    def iter_alerts():
-        yield "data: {\"status\":\"connected\"}\n\n"
-        for alert in get_alerts():
-            yield f"data: {json.dumps(alert)}\n\n"
+def alerts_stream(request: Request, after_id: int = 0):
+    try:
+        last_id = max(0, int(request.headers.get("last-event-id") or after_id))
+    except ValueError:
+        last_id = max(0, after_id)
 
-    return StreamingResponse(iter_alerts(), media_type="text/event-stream")
+    async def iter_alerts():
+        nonlocal last_id
+        loop = asyncio.get_running_loop()
+        last_heartbeat = loop.time()
+        yield "retry: 2000\n\n"
+        while not await request.is_disconnected():
+            pending = get_alerts_after(last_id)
+            for alert in pending:
+                last_id = alert["id"]
+                yield f"id: {last_id}\ndata: {json.dumps(alert, default=str)}\n\n"
+            if not pending and loop.time() - last_heartbeat >= 15:
+                yield ": keep-alive\n\n"
+                last_heartbeat = loop.time()
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        iter_alerts(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/analyze")

@@ -6,6 +6,7 @@ import InfrastructurePanel from "./InfrastructurePanel";
 import CaseManagement from "./CaseManagement";
 import EvidencePanel from "./EvidencePanel";
 import PrivacySettingsPanel from "./PrivacySettingsPanel";
+import AlertFeed from "./AlertFeed";
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -1326,6 +1327,7 @@ role:
         <RelationshipGraph />
         <CaseManagement />
         <PrivacySettingsPanel />
+        <AlertFeed />
         </div>
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
