@@ -8,6 +8,151 @@ import EvidencePanel from "./EvidencePanel";
 import PrivacySettingsPanel from "./PrivacySettingsPanel";
 import AlertFeed from "./AlertFeed";
 import MlClassifierPanel from "./MlClassifierPanel";
+
+type ScoreBreakdownItem = {
+  reason?: string;
+  points?: number;
+};
+
+type ReputationRecord = {
+  ip?: string;
+  status?: string;
+  malicious?: number;
+  suspicious?: number;
+  [key: string]: unknown;
+};
+
+type IpLocationRecord = {
+  ip?: string;
+  latitude?: number | string | null;
+  longitude?: number | string | null;
+  role?: string;
+  country?: string;
+  region?: string;
+  city?: string;
+  isp?: string;
+  organization?: string;
+  asn?: string;
+  reputation?: unknown;
+  [key: string]: unknown;
+};
+
+type UrlRecord = {
+  url?: string;
+  [key: string]: unknown;
+};
+
+type DomainRecord = {
+  domain?: string;
+  status?: string;
+  registrar?: string;
+  created?: string;
+  updated?: string;
+  expires?: string;
+  nameservers?: string[];
+  dns?: Record<string, string[] | string | number | boolean | null>;
+  signals?: string[];
+  [key: string]: unknown;
+};
+
+type RelayHop = {
+  hop: number;
+  header: string;
+  [key: string]: unknown;
+};
+
+type ThreatIndicator = {
+  type?: string;
+  value?: string | number | null;
+  severity?: string;
+  reason?: string;
+  [key: string]: unknown;
+};
+
+type UrlIntelligenceRecord = {
+  url?: string;
+  status?: string;
+  malicious?: number;
+  suspicious?: number;
+  reputation?: string | number | null;
+  [key: string]: unknown;
+};
+
+type AttachmentRecord = {
+  filename?: string;
+  risk?: string;
+  signals?: string[];
+  size?: number | string | null;
+  content_type?: string;
+  extension?: string;
+  reason?: string;
+  [key: string]: unknown;
+};
+
+type SecurityRecord = {
+  status?: string;
+  domain?: string;
+  sending_ip?: string;
+  selector?: string;
+  alignment?: string;
+  explanation?: string;
+  message?: string;
+  dns_name?: string;
+  record?: string;
+  [key: string]: unknown;
+};
+
+type InvestigationRecord = {
+  id?: number | string;
+  sender?: string;
+  recipient?: string;
+  subject?: string;
+  threat_score?: number;
+  risk_level?: string;
+  classification?: string;
+  origin_ip?: string;
+  created_at?: string | number | Date;
+  result?: unknown;
+  [key: string]: unknown;
+};
+
+type NlpAnalysis = {
+  assessment?: string;
+  signal_score?: number | null;
+  primary_threat?: string;
+  categories?: Record<string, unknown>;
+  brand_context?: string;
+  reply_to_domain_mismatch?: boolean;
+  suspicious_url_context?: string;
+  note?: string;
+};
+
+type MlClassifierRecord = {
+  model?: string;
+  classification?: string;
+  confidence?: number;
+  training_source?: string;
+  training_samples?: number;
+  class_counts?: Record<string, number>;
+  training_warning?: string;
+  confidence_note?: string;
+};
+
+type ThreatIntelligenceRecord = {
+  overall_status?: string;
+  summary?: {
+    ips_checked?: number;
+    malicious_ips?: number;
+    suspicious_ips?: number;
+    urls_checked?: number;
+    malicious_urls?: number;
+    suspicious_urls?: number;
+    domains_checked?: number;
+  };
+  indicators?: ThreatIndicator[];
+  [key: string]: unknown;
+};
+
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -18,28 +163,28 @@ export default function Home() {
   const [analysis, setAnalysis] = useState("");
   const [headers, setHeaders] = useState<Record<string, string>>({});
   const [threatScore, setThreatScore] = useState<number | null>(null);
-  const [scoreBreakdown, setScoreBreakdown] = useState<any[]>([]);
+  const [scoreBreakdown, setScoreBreakdown] = useState<ScoreBreakdownItem[]>([]);
   const [classification, setClassification] = useState("");
-  const [spf, setSpf] = useState<any>(null);
-  const [dkim, setDkim] = useState<any>(null);
-  const [dmarc, setDmarc] = useState<any>(null);   
+  const [spf, setSpf] = useState<SecurityRecord | null>(null);
+  const [dkim, setDkim] = useState<SecurityRecord | null>(null);
+  const [dmarc, setDmarc] = useState<SecurityRecord | null>(null);
   const [candidateOriginIp, setCandidateOriginIp] = useState("");
-  const [ipIntelligence, setIpIntelligence] = useState<any>(null);
-  const [ipLocations, setIpLocations] = useState<any[]>([]);
-  const [ipReputation, setIpReputation] = useState<any[]>([]);
+  const [ipIntelligence, setIpIntelligence] = useState<IpLocationRecord | null>(null);
+  const [ipLocations, setIpLocations] = useState<IpLocationRecord[]>([]);
+  const [ipReputation, setIpReputation] = useState<ReputationRecord[]>([]);
   const [findings, setFindings] = useState<string[]>([]);
-  const [relayPath, setRelayPath] = useState<any[]>([]);
+  const [relayPath, setRelayPath] = useState<RelayHop[]>([]);
   const [ipAddresses, setIpAddresses] = useState<string[]>([]);
   const [urls, setUrls] = useState<string[]>([]);
-  const [urlIntelligence, setUrlIntelligence] = useState<any[]>([]);
-  const [domainIntelligence, setDomainIntelligence] = useState<any[]>([]); 
-  const [attachments, setAttachments] = useState<any[]>([]);
-  const [threatIntelligence, setThreatIntelligence] = useState<any>(null);
-  const [nlpAnalysis, setNlpAnalysis] = useState<any>(null);
-  const [mlClassifier, setMlClassifier] = useState<any>(null);
-  const [investigations, setInvestigations] = useState<any[]>([]);
+  const [urlIntelligence, setUrlIntelligence] = useState<UrlIntelligenceRecord[]>([]);
+  const [domainIntelligence, setDomainIntelligence] = useState<DomainRecord[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
+  const [threatIntelligence, setThreatIntelligence] = useState<ThreatIntelligenceRecord | null>(null);
+  const [nlpAnalysis, setNlpAnalysis] = useState<NlpAnalysis | null>(null);
+  const [mlClassifier, setMlClassifier] = useState<MlClassifierRecord | null>(null);
+  const [investigations, setInvestigations] = useState<InvestigationRecord[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [selectedInvestigation, setSelectedInvestigation] = useState<any>(null);
+  const [selectedInvestigation, setSelectedInvestigation] = useState<InvestigationRecord | null>(null);
   const [historyError, setHistoryError] = useState("");
 useEffect(() => {
     fetch("https://threatloom.onrender.com/health")
@@ -82,6 +227,11 @@ useEffect(() => {
       console.error("Investigation details failed:", error);
       setHistoryError("Could not load investigation details.");
     }
+  };
+
+  const investigationIdNumber = (value: number | string | undefined) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   };
 
   const analyzeEmail = async () => {
@@ -148,30 +298,31 @@ useEffect(() => {
       );
 
       setHeaders(data.headers || {});
-  setSpf(data.spf || null);
-  setDkim(data.dkim || null);
-  setDmarc(data.dmarc || null);
-  setCandidateOriginIp(data.candidate_origin_ip || "");
-  setIpIntelligence(data.candidate_origin_intelligence || null);
-  setIpLocations(data.ip_intelligence || []);
-  setIpReputation(
-  (data.ip_intelligence || []).map(
-    (location: any) => location.reputation
-  )
-);
-  setFindings(data.findings || []);
-  setRelayPath(data.relay_path || []);
-  setIpAddresses(data.ip_addresses || []);
-  setUrls(
-    Array.isArray(data.urls)
-      ? data.urls.map((item: any) =>
-          typeof item === "string" ? item : item?.url || String(item ?? "")
-        )
-      : []
-  );
-  setUrlIntelligence(data.url_intelligence || []);
-  setDomainIntelligence(data.domain_intelligence || []);
-  setAttachments(data.attachments || []);
+      setSpf(data.spf || null);
+      setDkim(data.dkim || null);
+      setDmarc(data.dmarc || null);
+      setCandidateOriginIp(data.candidate_origin_ip || "");
+      setIpIntelligence(data.candidate_origin_intelligence || null);
+      setIpLocations(Array.isArray(data.ip_intelligence) ? data.ip_intelligence : []);
+      setIpReputation(
+        (Array.isArray(data.ip_intelligence) ? data.ip_intelligence : []).map((location: ReputationRecord) => ({
+          ...location,
+          reputation: location.reputation,
+        }))
+      );
+          setFindings(data.findings || []);
+          setRelayPath(data.relay_path || []);
+          setIpAddresses(data.ip_addresses || []);
+          setUrls(
+            Array.isArray(data.urls)
+              ? data.urls.map((item: string | UrlRecord | null | undefined) =>
+                  typeof item === "string" ? item : item?.url || String(item ?? "")
+                )
+              : []
+          );
+          setUrlIntelligence(Array.isArray(data.url_intelligence) ? data.url_intelligence : []);
+          setDomainIntelligence(Array.isArray(data.domain_intelligence) ? data.domain_intelligence : []);
+          setAttachments(Array.isArray(data.attachments) ? data.attachments : []);
   setThreatIntelligence(data.threat_intelligence || null);
   setNlpAnalysis(data.nlp_analysis || null);
   setMlClassifier(data.ml_classifier || null);
@@ -214,22 +365,28 @@ setAnalysis(
       );
       setHeaders(data.headers || {});
 
-setSpf(data.spf || null);
-setDkim(data.dkim || null);
-setDmarc(data.dmarc || null);
-setCandidateOriginIp(data.candidate_origin_ip || "");
-setIpIntelligence(data.candidate_origin_intelligence || null);
-setFindings(data.findings || []);
-setRelayPath(data.relay_path || []);
-setIpAddresses(data.ip_addresses || []);
-setUrls(data.urls || []);
-setUrlIntelligence(data.url_intelligence || []);
-       setDomainIntelligence(data.domain_intelligence || []);
-       setThreatIntelligence(data.threat_intelligence || null);
-        setMlClassifier(data.ml_classifier || null);
-setAnalysis(
-  `Analysis complete. Threat Score: ${data.threat_score}`
-);
+      setSpf(data.spf || null);
+      setDkim(data.dkim || null);
+      setDmarc(data.dmarc || null);
+      setCandidateOriginIp(data.candidate_origin_ip || "");
+      setIpIntelligence(data.candidate_origin_intelligence || null);
+      setFindings(data.findings || []);
+      setRelayPath(data.relay_path || []);
+      setIpAddresses(data.ip_addresses || []);
+      setUrls(
+        Array.isArray(data.urls)
+          ? data.urls.map((item: string | UrlRecord | null | undefined) =>
+              typeof item === "string" ? item : item?.url || String(item ?? "")
+            )
+          : []
+      );
+      setUrlIntelligence(Array.isArray(data.url_intelligence) ? data.url_intelligence : []);
+      setDomainIntelligence(Array.isArray(data.domain_intelligence) ? data.domain_intelligence : []);
+      setThreatIntelligence(data.threat_intelligence || null);
+      setMlClassifier(data.ml_classifier || null);
+      setAnalysis(
+        `Analysis complete. Threat Score: ${data.threat_score}`
+      );
       await loadInvestigations();
     } catch (error) {
       setAnalysis("Backend connection failed.");
@@ -430,29 +587,37 @@ setAnalysis(
                 <p className="text-sm font-semibold text-white">Detected Categories</p>
                 {nlpAnalysis.categories && Object.keys(nlpAnalysis.categories).length > 0 ? (
                   <div className="mt-3 space-y-2">
-                    {Object.entries(nlpAnalysis.categories).map(([category, matches]: [string, any]) => (
-                      <div
-                        key={category}
-                        className="rounded-lg border border-slate-800 bg-slate-900 p-3"
-                      >
-                        <p className="text-sm font-semibold capitalize text-slate-200">
-                          {category.replaceAll("_", " ")}
-                        </p>
-                        <p className="mt-1 break-words text-sm text-slate-400">
-                          {Array.isArray(matches)
-                            ? matches
-                                .map((item: any) =>
-                                  typeof item === "string"
-                                    ? item
-                                    : item?.url || item?.value || JSON.stringify(item)
-                                )
-                                .join(", ")
-                            : typeof matches === "object" && matches !== null
-                            ? JSON.stringify(matches)
-                            : String(matches)}
-                        </p>
-                      </div>
-                    ))}
+                    {Object.entries((nlpAnalysis.categories ?? {}) as Record<string, unknown>).map(([category, matches]) => {
+                      const formattedMatches = Array.isArray(matches)
+                        ? matches
+                            .map((item: unknown) =>
+                              typeof item === "string"
+                                ? item
+                                : typeof item === "object" && item !== null && "url" in item
+                                  ? String((item as { url?: string }).url ?? "")
+                                  : typeof item === "object" && item !== null && "value" in item
+                                    ? String((item as { value?: unknown }).value ?? "")
+                                    : JSON.stringify(item)
+                            )
+                            .join(", ")
+                        : typeof matches === "object" && matches !== null
+                          ? JSON.stringify(matches)
+                          : String(matches ?? "");
+
+                      return (
+                        <div
+                          key={category}
+                          className="rounded-lg border border-slate-800 bg-slate-900 p-3"
+                        >
+                          <p className="text-sm font-semibold capitalize text-slate-200">
+                            {category.replaceAll("_", " ")}
+                          </p>
+                          <p className="mt-1 break-words text-sm text-slate-400">
+                            {formattedMatches}
+                          </p>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="mt-3 text-sm text-slate-400">No NLP categories detected.</p>
@@ -487,6 +652,7 @@ setAnalysis(
         )}
 
         <MlClassifierPanel data={mlClassifier} />
+
         <div className="mt-6 grid gap-6 md:grid-cols-3">
          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
   <div className="flex items-center justify-between">
@@ -798,17 +964,17 @@ locations={ipLocations
       location.longitude != null
   )
   .map((location) => ({
-    ip: location.ip,
+    ip: location.ip ?? "unknown",
     latitude: Number(location.latitude),
     longitude: Number(location.longitude),
     label:
       location.ip === candidateOriginIp
-        ? `Candidate Origin: ${location.ip}`
-        : `Relay IP: ${location.ip}`,
-role:
-  location.ip === candidateOriginIp
-    ? "Candidate Origin"
-    : location.role || "Relay Server",
+        ? `Candidate Origin: ${location.ip ?? "unknown"}`
+        : `Relay IP: ${location.ip ?? "unknown"}`,
+    role:
+      location.ip === candidateOriginIp
+        ? "Candidate Origin"
+        : location.role || "Relay Server",
     country: location.country,
     region: location.region,
     city: location.city,
@@ -865,26 +1031,32 @@ role:
         </h4>
 
         <div className="mt-3 space-y-3">
-          {relayPath.map((hop) => (
-            <div
-              key={hop.hop}
-              className="rounded-lg border border-slate-800 bg-slate-950 p-4"
-            >
-              <p className="text-sm font-semibold text-blue-400">
-                Hop {hop.hop}
-              </p>
+          {relayPath.map((hop) => {
+            const hopIps = Array.isArray((hop as { ip_addresses?: unknown }).ip_addresses)
+              ? ((hop as { ip_addresses?: unknown[] }).ip_addresses as string[])
+              : [];
 
-              <p className="mt-2 break-all text-sm text-slate-300">
-                {hop.header}
-              </p>
-
-              {hop.ip_addresses?.length > 0 && (
-                <p className="mt-2 text-xs text-slate-500">
-                  IPs: {hop.ip_addresses.join(", ")}
+            return (
+              <div
+                key={hop.hop}
+                className="rounded-lg border border-slate-800 bg-slate-950 p-4"
+              >
+                <p className="text-sm font-semibold text-blue-400">
+                  Hop {hop.hop}
                 </p>
-              )}
-            </div>
-          ))}
+
+                <p className="mt-2 break-all text-sm text-slate-300">
+                  {hop.header}
+                </p>
+
+                {hopIps.length > 0 && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    IPs: {hopIps.join(", ")}
+                  </p>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     )}
@@ -1026,7 +1198,9 @@ role:
         const displayUrl =
           typeof url === "string"
             ? url
-            : (url as any)?.url || String(url ?? "");
+            : typeof url === "object" && url !== null && "url" in url
+              ? String((url as { url?: string }).url ?? "")
+              : String(url ?? "");
 
         const intelligence = urlIntelligence[index];
 
@@ -1094,7 +1268,7 @@ role:
     </h3>
 
     <div className="mt-4 space-y-4">
-      {domainIntelligence.map((domain: any, index: number) => (
+      {domainIntelligence.map((domain: DomainRecord, index: number) => (
         <div
           key={`${domain.domain || "domain"}-${index}`}
           className="rounded-xl border border-slate-800 bg-slate-950 p-4"
@@ -1144,7 +1318,7 @@ role:
             <div className="mt-4">
               <p className="text-sm font-semibold text-white">DNS Records</p>
               <div className="mt-2 grid gap-2 text-xs text-slate-400 md:grid-cols-2">
-                {Object.entries(domain.dns).map(([recordType, values]: [string, any]) => (
+                {Object.entries(domain.dns ?? {}).map(([recordType, values]) => (
                   <div
                     key={recordType}
                     className="rounded-lg border border-slate-800 bg-slate-900 p-3"
@@ -1153,7 +1327,7 @@ role:
                       {recordType}
                     </p>
                     <p className="mt-1 break-all">
-                      {Array.isArray(values) ? values.join(", ") : String(values)}
+                      {Array.isArray(values) ? values.join(", ") : String(values ?? "")}
                     </p>
                   </div>
                 ))}
@@ -1247,9 +1421,9 @@ role:
                     </h4>
                     <div className="mt-3 space-y-2">
                       {threatIntelligence.indicators.map(
-                        (indicator: any, index: number) => (
+                          (indicator: ThreatIndicator, index: number) => (
                           <div
-                            key={`${indicator.type || "indicator"}-${indicator.value || index}-${index}`}
+                              key={`${indicator.type || "indicator"}-${indicator.value ?? index}-${index}`}
                             className="rounded-lg border border-slate-800 bg-slate-950 p-3"
                           >
                             <div className="flex flex-wrap items-center gap-2">
@@ -1260,7 +1434,7 @@ role:
                                 {indicator.severity || "Info"}
                               </span>
                               <span className="break-all text-sm text-blue-400">
-                                {indicator.value || "Unknown"}
+                                  {String(indicator.value ?? "Unknown")}
                               </span>
                             </div>
                             {indicator.reason && (
@@ -1331,11 +1505,11 @@ role:
   )}
 </div>
 
+        </div>
         <RelationshipGraph />
         <CaseManagement />
         <PrivacySettingsPanel />
         <AlertFeed />
-        </div>
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -1394,7 +1568,12 @@ role:
                       <td className="px-3 py-4 text-slate-300">{item.classification || "Unknown"}</td>
                       <td className="px-3 py-4">
                         <button
-                          onClick={() => viewInvestigation(item.id)}
+                          onClick={() => {
+                            const numericId = investigationIdNumber(item.id);
+                            if (numericId !== null) {
+                              void viewInvestigation(numericId);
+                            }
+                          }}
                           className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold hover:bg-blue-500"
                         >
                           View
@@ -1422,20 +1601,27 @@ role:
                 <p><strong className="text-white">Sender:</strong> {selectedInvestigation.sender || "Unknown"}</p>
                 <p><strong className="text-white">Recipient:</strong> {selectedInvestigation.recipient || "Unknown"}</p>
                 <p><strong className="text-white">Subject:</strong> {selectedInvestigation.subject || "No subject"}</p>
-                <p><strong className="text-white">Threat Score:</strong> {selectedInvestigation.threat_score ?? "--"}</p>
+                    <p><strong className="text-white">Threat Score:</strong> {selectedInvestigation.threat_score ?? "--"}</p>
                 <p><strong className="text-white">Risk:</strong> {selectedInvestigation.risk_level || "Unknown"}</p>
                 <p><strong className="text-white">Classification:</strong> {selectedInvestigation.classification || "Unknown"}</p>
                 <p><strong className="text-white">Origin IP:</strong> {selectedInvestigation.origin_ip || "Not available"}</p>
-                <p><strong className="text-white">Created:</strong> {selectedInvestigation.created_at ? new Date(selectedInvestigation.created_at).toLocaleString() : "Unknown"}</p>
+                    <p><strong className="text-white">Created:</strong> {(() => {
+                      const createdAt = selectedInvestigation.created_at;
+                      if (createdAt == null) return "Unknown";
+                      const date = createdAt instanceof Date ? createdAt : new Date(createdAt);
+                      return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+                    })()}</p>
               </div>
               <EvidencePanel investigationId={selectedInvestigation.id ?? ""} />
-              {selectedInvestigation.result && (
+              {selectedInvestigation.result != null && (
                 <details className="mt-5">
                   <summary className="cursor-pointer text-sm font-semibold text-blue-400">
                     View complete stored analysis
                   </summary>
                   <pre className="mt-3 max-h-96 overflow-auto rounded-lg border border-slate-800 bg-black/30 p-4 text-xs text-slate-300">
-                    {JSON.stringify(selectedInvestigation.result, null, 2)}
+                    {typeof selectedInvestigation.result === "string"
+                      ? selectedInvestigation.result
+                      : JSON.stringify(selectedInvestigation.result, null, 2)}
                   </pre>
                 </details>
               )}
