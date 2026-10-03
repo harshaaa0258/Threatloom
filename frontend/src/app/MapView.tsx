@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   setOptions,
   importLibrary,
@@ -36,8 +36,11 @@ export default function MapView({
   locations = [],
 }: MapViewProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
+  const [mapMessage, setMapMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    let isActive = true;
+
     const loadMap = async () => {
       if (!mapRef.current) return;
 
@@ -45,13 +48,14 @@ export default function MapView({
         process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
       if (!apiKey) {
-        console.error(
-          "Google Maps API key is missing."
+        setMapMessage(
+          "Google Maps is not configured. Add NEXT_PUBLIC_GOOGLE_MAPS_API_KEY to frontend/.env.local and restart the frontend."
         );
         return;
       }
 
       try {
+        setMapMessage(null);
         setOptions({
           key: apiKey,
           v: "weekly",
@@ -62,6 +66,8 @@ export default function MapView({
 
         const { AdvancedMarkerElement } =
           (await importLibrary("marker")) as google.maps.MarkerLibrary;
+
+        if (!isActive || !mapRef.current) return;
 
         let points = locations.filter(
           (location) =>
@@ -190,21 +196,43 @@ marker.addListener("click", () => {
         if (points.length > 1) {
           map.fitBounds(bounds);
         }
-      } catch (error) {
-        console.error(
-          "Google Maps failed to load:",
-          error
-        );
+      } catch {
+        if (isActive) {
+          setMapMessage(
+            "Google Maps could not be loaded. Check that the API key is valid and Maps JavaScript API is enabled for it."
+          );
+        }
       }
     };
 
     loadMap();
+    return () => {
+      isActive = false;
+    };
   }, [latitude, longitude, label, locations]);
 
   return (
-    <div
-      ref={mapRef}
-      className="h-[400px] w-full overflow-hidden rounded-xl"
-    />
+    <div className="relative h-[400px] w-full overflow-hidden rounded-xl">
+      <div ref={mapRef} className="h-full w-full" />
+      {mapMessage && (
+        <div
+          role="status"
+          className="absolute inset-0 flex items-center justify-center bg-slate-950/95 p-6 text-center"
+        >
+          <div className="max-w-lg">
+            <p className="font-semibold text-slate-100">
+              Google Maps unavailable
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-300">
+              {mapMessage}
+            </p>
+            <p className="mt-3 text-xs text-slate-400">
+              Restrict the key to your app&apos;s allowed website referrers and
+              enable the Maps JavaScript API in Google Cloud.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
