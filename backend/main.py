@@ -32,6 +32,11 @@ except ImportError:
     from infrastructure_intel import build_infrastructure_intelligence
 
 try:
+    from .relay_forensics import analyze_relay_path
+except ImportError:
+    from relay_forensics import analyze_relay_path
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -1518,6 +1523,11 @@ def analyze_email(request: EmailRequest):
 
     if ip_addresses:
         candidate_origin_ip = ip_addresses[-1]            
+    relay_path_analysis = analyze_relay_path(received_headers, relay_path)
+    for anomaly in relay_path_analysis["anomalies"]:
+        findings.append(
+            f"Relay path {anomaly['severity'].lower()} signal: {anomaly['summary']} {anomaly['evidence']}"
+        )
     # Look up real information for each extracted IP
     ip_intelligence = []
 
@@ -1911,6 +1921,7 @@ def analyze_email(request: EmailRequest):
         "ml_classifier": ml_analysis,
         "received_headers": received_headers,
         "relay_path":relay_path,
+        "relay_path_analysis": relay_path_analysis,
         "ip_addresses": ip_addresses,
         "candidate_origin_ip":candidate_origin_ip,
         "candidate_origin_intelligence":candidate_origin_intelligence,
