@@ -52,3 +52,14 @@ trusted. HTTPS is required when using this over a network.
 This token check protects evidence-event writes only; it is not general API
 authentication. Evidence actor tokens do not establish a legal identity, and
 database administrators can still alter SQLite files outside the API.
+
+## DKIM verification
+
+Analysis verifies up to five DKIM signatures cryptographically against DNS
+keys using the original message bytes. `pass` means at least one signature
+verified; individual signatures and their From-domain alignment are reported.
+If there are more than five signatures and none of the checked signatures
+passed, the result is `partial`. `fail` means all signatures were checked and
+none verified; `error` means verification could not complete (for example,
+due to DNS availability). A verified, aligned DKIM signature is one
+authentication signal, not proof that the account or message is benign.

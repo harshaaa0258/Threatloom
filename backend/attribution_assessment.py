@@ -55,11 +55,15 @@ def build_attribution_assessment(
             auth_points += 15
             signals.append({"type": "verified_aligned_dkim", "effect": "supports", "points": 15, "detail": "DKIM reports cryptographic verification and alignment."})
         score += min(auth_points, 30)
-        if dmarc_status == "fail" or spf_status in {"fail", "softfail", "permerror"}:
+        if (
+            dmarc_status == "fail"
+            or spf_status in {"fail", "softfail", "permerror"}
+            or dkim_status == "fail"
+        ):
             score -= 10
             signals.append({"type": "authentication_failure", "effect": "reduces", "points": -10, "detail": "An authentication evaluation failed or did not align with the visible sender domain."})
-        if dkim_status == "key_found":
-            signals.append({"type": "dkim_not_verified", "effect": "neutral", "points": 0, "detail": "A DKIM public key was found, but the message signature was not cryptographically verified."})
+        if dkim_status in {"error", "invalid_header", "partial"}:
+            signals.append({"type": "dkim_not_verified", "effect": "neutral", "points": 0, "detail": "DKIM could not be fully verified; no cryptographic pass is inferred."})
 
     if sender_domains and reply_domains:
         if sender_domains.intersection(reply_domains):

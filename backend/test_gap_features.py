@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import sqlite3
@@ -14,6 +15,8 @@ from chain_of_custody import (
     initialize_evidence_tables,
     sha256_bytes,
 )
+from attribution_assessment import build_attribution_assessment
+from dkim_verification import verify_dkim_signatures
 from main import (
     ReviewedTrainingDataError,
     _load_ml_training_data,
@@ -24,6 +27,150 @@ from main import (
 from message_patterns import analyze_bec_patterns, analyze_obfuscated_urls
 from privacy_controls import mask_sensitive_data
 from relay_forensics import analyze_relay_path
+
+
+def test_dkim_verification_cryptographically_checks_message_bytes(monkeypatch):
+    signed_message = base64.b64decode(
+        "REtJTS1TaWduYXR1cmU6IHY9MTsgYT1yc2Etc2hhMjU2OyBjPXJlbGF4ZWQvc2ltcGxlOyBkPWV4YW1wbGUuY29tOw0K"
+        "IGk9QGV4YW1wbGUuY29tOyBxPWRucy90eHQ7IHM9c2VsZWN0b3I7IHQ9MTc5MTA1MTc4MjsgaD1mcm9tIDogc3ViamVjdDsN"
+        "CiBiaD1xazFhUHdsRWxtaFB0Q2JycWRGK0liMGlVaTJiQnQrazJZUXpJNEt3ZExjPTsNCiBiPUR4ZE5xQ1NLS3dKMGRremZN"
+        "ZzJOeUcwK0RjYzg5dkpRVlJXZXJJeDc2KzFBejNoYkl5TUR4RDV1cVY4ZVAzNUZtQUNvcQ0KIFBLcXo0SVZvZWdleFJ0bWtR"
+        "SGtBRnZnbnB4dTBickZLUVg3UjkyOW1NdFVVWkpvekI4dWVCeXdrbVAvSC8xaHJDT3ZzMTNsDQogQzhoNDRDMW5pSThobzUxb"
+        "FBKUnVIQUJrYi9idFhXZz0NCkZyb206IHNlbmRlckBleGFtcGxlLmNvbQ0KU3ViamVjdDogVGVzdCBES0lNDQoNCk9yaWdpbmFs"
+        "IGJvZHkNCg=="
+    )
+    dns_record = (
+        b"v=DKIM1; k=rsa; "
+        b"p=MIGJAoGBAILPwvtLsDhCJZcW4HxFDirwww5XklHnTjGHT1h8BvOYo4NgzVdQhZbxLkh0oEhB4E1Pwjd4i9yddNmCQ9VQyNQtlTD8elOxX9nTiIR20uT5CBjB46KAezT3IjMtJ6dkB5F0z+VXs2dYOe/mTS+iLoYVSx/uP37T8r/BGyaxgpIHAgMBAAE="
+    )
+
+    def dnsfunc(name, timeout=5):
+        if name.rstrip(b".") == b"selector._domainkey.example.com":
+            return dns_record
+        return None
+
+    result = verify_dkim_signatures(signed_message, dnsfunc=dnsfunc)
+    assert result["status"] == "pass"
+    assert result["domain"] == "example.com"
+    assert result["selector"] == "selector"
+    assert result["signatures"][0]["status"] == "pass"
+
+    tampered = verify_dkim_signatures(
+        signed_message.replace(b"Original body", b"Changed body"),
+        dnsfunc=dnsfunc,
+    )
+    assert tampered["status"] == "fail"
+    assert tampered["signatures"][0]["status"] == "fail"
+
+    monkeypatch.setattr(
+        main_module,
+        "verify_dkim_signatures",
+        lambda raw_message: verify_dkim_signatures(raw_message, dnsfunc=dnsfunc),
+    )
+    monkeypatch.setattr(main_module, "check_dmarc", lambda domain: {"status": "found"})
+    monkeypatch.setattr(
+        main_module,
+        "build_attribution_assessment",
+        lambda *args, **kwargs: {"status": "not_available"},
+    )
+    analysis = main_module._analyze_email(
+        main_module.EmailRequest(
+            email=signed_message.decode("ascii"),
+            source_file_base64=base64.b64encode(signed_message).decode("ascii"),
+        ),
+        mask_response=False,
+        persist=False,
+        allow_external_lookups=False,
+    )
+
+    assert analysis["dkim"]["status"] == "pass"
+    assert analysis["dkim"]["alignment"] == "aligned"
+    assert analysis["dmarc_evaluation"]["status"] == "pass"
+
+
+def test_dkim_verification_reports_dns_or_crypto_errors(monkeypatch):
+    class FailingVerifier:
+        def __init__(self, message):
+            pass
+
+        def verify(self, idx):
+            raise TimeoutError("DNS lookup timed out")
+
+    monkeypatch.setattr("dkim_verification.dkim.DKIM", FailingVerifier)
+    message = (
+        b"From: sender@example.com\r\n"
+        b"DKIM-Signature: v=1; d=example.com; s=selector; b=signature\r\n"
+        b"\r\nbody"
+    )
+
+    result = verify_dkim_signatures(message)
+
+    assert result["status"] == "error"
+    assert result["signatures"][0]["error"] == "DNS lookup timed out"
+
+
+def test_dkim_verification_bounds_header_work(monkeypatch):
+    class InvalidVerifier:
+        def __init__(self, message):
+            pass
+
+        def verify(self, idx):
+            return False
+
+    monkeypatch.setattr("dkim_verification.dkim.DKIM", InvalidVerifier)
+    headers = "\r\n".join(
+        "DKIM-Signature: v=1; d=example.com; s=selector; b=signature"
+        for _ in range(6)
+    )
+    message = f"From: sender@example.com\r\n{headers}\r\n\r\nbody".encode()
+
+    result = verify_dkim_signatures(message)
+
+    assert result["status"] == "partial"
+    assert result["verification_limited"] is True
+    assert len(result["signatures"]) == 5
+
+
+def test_dkim_verification_handles_absent_signature():
+    result = verify_dkim_signatures(b"From: sender@example.com\r\n\r\nbody")
+
+    assert result["status"] == "not_present"
+    assert result["signatures"] == []
+
+
+def test_failed_dkim_signature_reduces_attribution_assessment(tmp_path):
+    database = str(tmp_path / "attribution.db")
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE investigations (
+            id INTEGER PRIMARY KEY,
+            sender TEXT,
+            origin_ip TEXT,
+            result_json TEXT
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    assessment = build_attribution_assessment(
+        database,
+        {"from": "sender@example.com"},
+        spf_result=None,
+        dkim_result={"status": "fail", "alignment": "aligned"},
+        dmarc_evaluation={"status": "fail"},
+        candidate_origin_ip=None,
+        candidate_origin_intelligence=None,
+        relay_path_analysis=None,
+    )
+
+    failure = next(
+        signal
+        for signal in assessment["signals"]
+        if signal["type"] == "authentication_failure"
+    )
+    assert failure["points"] == -10
 
 
 def test_relay_path_flags_timestamp_order_anomaly():

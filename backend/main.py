@@ -96,6 +96,11 @@ except ImportError:
     from phishing_intel import check_phishtank_urls
 
 try:
+    from .dkim_verification import verify_dkim_signatures
+except ImportError:
+    from dkim_verification import verify_dkim_signatures
+
+try:
     from .gmail_monitor import GmailInboxMonitor
 except ImportError:
     from gmail_monitor import GmailInboxMonitor
@@ -633,52 +638,6 @@ def check_spf(domain: str):
         return {
             "status": "error",
             "record": None,
-            "error": str(e),
-        }
-def check_dkim(domain: str, selector: str):
-    try:
-        resolver = dns.resolver.Resolver()
-
-        resolver.nameservers = [
-            "8.8.8.8",
-            "1.1.1.1",
-        ]
-
-        resolver.timeout = 3
-        resolver.lifetime = 6
-
-        dkim_domain = f"{selector}._domainkey.{domain}"
-
-        answers = resolver.resolve(dkim_domain, "TXT")
-
-        records = []
-
-        for answer in answers:
-            record = answer.to_text().strip('"')
-            records.append(record)
-
-        return {
-            "status": "key_found",
-            "domain": domain,
-            "selector": selector,
-            "dns_name": dkim_domain,
-            "records": records,
-        }
-
-    except dns.resolver.NXDOMAIN:
-        return {
-            "status": "key_not_found",
-            "domain": domain,
-            "selector": selector,
-            "dns_name": dkim_domain,
-        }
-
-    except Exception as e:
-        return {
-            "status": "error",
-            "domain": domain,
-            "selector": selector,
-            "dns_name": dkim_domain,
             "error": str(e),
         }
 def check_dmarc(domain: str):
@@ -2052,83 +2011,57 @@ def _analyze_email(
     sender = headers.get("from", "")
     reply_to = headers.get("reply-to", "")
     return_path = headers.get("return-path", "")
-        # Detect DKIM-Signature header
-    dkim_result = None
-
-    dkim_header = None
-
-    for line in email_text.splitlines():
-        if line.lower().startswith("dkim-signature:"):
-            dkim_header = line
-            break
-
-    if dkim_header:
-        dkim_domain_match = re.search(
-            r"\bd=([^;\s]+)",
-            dkim_header,
-            re.IGNORECASE
-        )
-
-        dkim_selector_match = re.search(
-            r"\bs=([^;\s]+)",
-            dkim_header,
-            re.IGNORECASE
-        )
-
-        if dkim_domain_match and dkim_selector_match:
-            dkim_domain = dkim_domain_match.group(1).strip()
-            dkim_selector = dkim_selector_match.group(1).strip()
-
-            dkim_result = check_dkim(
-                dkim_domain,
-                dkim_selector
+    dkim_result = verify_dkim_signatures(source_content)
+    if dkim_result.get("signatures") and sender and "@" in sender:
+        from_domain = sender.split("@")[-1].replace(">", "").strip()
+        for signature in dkim_result["signatures"]:
+            signature_domain = signature.get("domain")
+            signature["alignment"] = (
+                "aligned"
+                if signature_domain and domains_align(from_domain, signature_domain)
+                else "not_aligned"
             )
-            # Check DKIM signing-domain alignment
-            if sender and "@" in sender:
-                from_domain = sender.split("@")[-1].replace(">", "").strip()
 
-                dkim_aligned = domains_align(
-                    from_domain,
-                    dkim_domain
-                )
+        selected_signature = next(
+            (
+                signature
+                for signature in dkim_result["signatures"]
+                if signature["status"] == "pass"
+                and signature["alignment"] == "aligned"
+            ),
+            next(
+                (
+                    signature
+                    for signature in dkim_result["signatures"]
+                    if signature["status"] == "pass"
+                ),
+                dkim_result["signatures"][0],
+            ),
+        )
+        dkim_result["domain"] = selected_signature.get("domain")
+        dkim_result["selector"] = selected_signature.get("selector")
+        dkim_result["from_domain"] = from_domain
+        dkim_result["alignment"] = selected_signature["alignment"]
 
-                dkim_result["from_domain"] = from_domain
-                dkim_result["alignment"] = (
-                    "aligned" if dkim_aligned else "not_aligned"
-                )
-
-                if dkim_aligned:
-                    findings.append(
-                        "DKIM signing domain aligns with the visible From domain."
-                    )
-                else:
-                    findings.append(
-                        "DKIM signing domain does not align with the visible From domain."
-                    )
+        if dkim_result["alignment"] == "aligned":
+            findings.append("DKIM signing domain aligns with the visible From domain.")
         else:
-            dkim_result = {
-                "status": "invalid_header",
-                "message": "DKIM-Signature header was found, but domain or selector could not be extracted."
-            }
-                # Add DKIM result to evidence-based findings
+            findings.append("DKIM signing domain does not align with the visible From domain.")
+
     if dkim_result:
         dkim_status = dkim_result.get("status", "")
 
-        if dkim_status == "key_found":
-            findings.append(
-                "DKIM public key found. Cryptographic signature verification has not yet been performed."
-            )
+        if dkim_status == "pass":
+            findings.append("DKIM signature passed cryptographic verification.")
 
-        elif dkim_status == "key_not_found":
+        elif dkim_status == "fail":
             score += 15
-            findings.append(
-                "DKIM verification problem: no public key was found for the signing domain and selector."
-            )
+            findings.append("DKIM signature failed cryptographic verification.")
 
         elif dkim_status == "invalid_header":
             score += 5
             findings.append(
-                "DKIM-Signature header is present but could not be parsed correctly."
+                "DKIM-Signature header could not be parsed for cryptographic verification."
             )
 
         elif dkim_status == "not_present":
@@ -2137,15 +2070,12 @@ def _analyze_email(
             )
 
         elif dkim_status == "error":
+            findings.append("DKIM signature verification could not be completed.")
+        elif dkim_status == "partial":
             findings.append(
-                "DKIM public-key lookup could not be completed."
+                "DKIM verification was limited; no checked signature passed."
             )
-    else:
-        dkim_result = {
-            "status": "not_present",
-            "message": "No DKIM-Signature header was found."
-        }
-        # Check DMARC policy
+    # Check DMARC policy
     dmarc_result = None
 
     if sender and "@" in sender:
@@ -3419,7 +3349,13 @@ def build_recommendations(result: dict):
             "reason": f"Threat intelligence reported {suspicious_ips} suspicious IP indicator(s)."
         })
 
-    if str(dmarc_eval.get("status", "")).lower() == "fail" or str(spf_result.get("status", "")).lower() in {"fail", "softfail", "permerror"} or str(dkim_result.get("status", "")).lower() in {"key_not_found", "invalid_header", "error"}:
+    dkim_status = str(dkim_result.get("status", "")).lower()
+    authentication_failed = (
+        str(dmarc_eval.get("status", "")).lower() == "fail"
+        or str(spf_result.get("status", "")).lower() in {"fail", "softfail", "permerror"}
+        or dkim_status in {"fail", "invalid_header", "partial", "error"}
+    )
+    if authentication_failed:
         recommendations.append({
             "priority": "Medium",
             "action": "Review SPF, DKIM and DMARC failures and validate the sender against trusted organizational mail infrastructure.",
