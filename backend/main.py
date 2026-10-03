@@ -83,6 +83,11 @@ except ImportError:
     )
 
 try:
+    from .domain_fingerprints import fingerprint_hosting, lookup_traditional_whois
+except ImportError:
+    from domain_fingerprints import fingerprint_hosting, lookup_traditional_whois
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -587,7 +592,7 @@ def extract_url_domains(urls: list[str]):
     return domains
 
 
-def check_domain_intelligence(domain: str):
+def check_domain_intelligence(domain: str, include_whois: bool = False):
     """Collect passive DNS + RDAP registration intelligence for a domain."""
     domain = (domain or "").strip().lower().rstrip(".")
 
@@ -608,7 +613,7 @@ def check_domain_intelligence(domain: str):
     resolver.timeout = 3
     resolver.lifetime = 6
 
-    for record_type in ["A", "AAAA", "MX", "NS", "TXT"]:
+    for record_type in ["A", "AAAA", "CNAME", "MX", "NS", "TXT"]:
         try:
             answers = resolver.resolve(domain, record_type)
             values = [answer.to_text().strip('\"') for answer in answers]
@@ -677,7 +682,30 @@ def check_domain_intelligence(domain: str):
         result["rdap"] = {"status": "error", "message": str(e)}
         result["signals"].append("RDAP lookup could not be completed.")
 
-    if not any(result["dns"].get(record) for record in ["A", "AAAA", "MX", "NS"]):
+    if result["rdap"].get("status") == "found":
+        for field in ["registrar", "created", "updated", "expires", "nameservers"]:
+            result[field] = result["rdap"].get(field)
+
+    result["hosting_fingerprint"] = fingerprint_hosting(result["dns"])
+    if include_whois:
+        result["whois"] = lookup_traditional_whois(domain)
+        if result["whois"].get("status") == "found":
+            summary = result["whois"].get("registrar") or "Registrar unavailable"
+            if result["whois"].get("created"):
+                summary += f"; created {result['whois']['created']}"
+            result["signals"].append(f"Traditional WHOIS registration details: {summary}.")
+        else:
+            result["signals"].append(
+                "Traditional WHOIS status is "
+                f"{result['whois'].get('status', 'unavailable')}; RDAP remains the registration fallback."
+            )
+    for observation in result["hosting_fingerprint"].get("observations", []):
+        result["signals"].append(
+            f"Passive DNS {observation['category'].replace('_', ' ')} fingerprint suggests "
+            f"{observation['provider']} via {observation['indicator']}."
+        )
+
+    if not any(result["dns"].get(record) for record in ["A", "AAAA", "CNAME", "MX", "NS"]):
         result["signals"].append("No common DNS records were returned for this domain.")
 
     if not result["dns"].get("MX"):
@@ -1537,7 +1565,7 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
             intelligence_domains.append(domain)
 
     domain_intelligence = [
-        check_domain_intelligence(domain)
+        check_domain_intelligence(domain, include_whois=(domain == sender_domain_for_intel))
         for domain in intelligence_domains[:5]
     ]
 
@@ -2654,8 +2682,8 @@ def api_ip_intelligence(ip: str):
 
 @app.get("/api/domain-intelligence/{domain}")
 def api_domain_intelligence(domain: str):
-    """Return passive DNS and RDAP intelligence for one domain."""
-    return check_domain_intelligence(domain)
+    """Return passive DNS, RDAP, WHOIS, and hosting fingerprints for one domain."""
+    return _privacy_response(check_domain_intelligence(domain, include_whois=True))
 
 
 @app.get("/api/health")
@@ -2929,9 +2957,23 @@ def _format_domain_intelligence(domains):
             if rdap.get(key):
                 rows.append((f"Domain {index} {label}", rdap.get(key)))
 
+        whois = item.get("whois") or {}
+        if whois:
+            rows.append((f"Domain {index} WHOIS Status", whois.get("status") or "Unavailable"))
+            rows.append((f"Domain {index} WHOIS Server", whois.get("server") or "Unavailable"))
+            for label, key in [("WHOIS Registrar", "registrar"), ("WHOIS Created", "created"),
+                               ("WHOIS Updated", "updated"), ("WHOIS Expires", "expires")]:
+                if whois.get(key):
+                    rows.append((f"Domain {index} {label}", whois.get(key)))
+
+        hosting = item.get("hosting_fingerprint") or {}
+        if hosting:
+            rows.append((f"Domain {index} Hosting Fingerprints", hosting.get("observations") or hosting.get("status")))
+            rows.append((f"Domain {index} Hosting Note", hosting.get("note")))
+
         dns = item.get("dns") or {}
         dns_records = []
-        for record_type in ["A", "AAAA", "MX", "NS", "TXT"]:
+        for record_type in ["A", "AAAA", "CNAME", "MX", "NS", "TXT"]:
             values = dns.get(record_type) or []
             if values:
                 dns_records.append(f"{record_type}: {', '.join(map(str, values))}")
