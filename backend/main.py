@@ -8,6 +8,7 @@ import dns.resolver
 import requests
 import ipaddress
 import asyncio
+import csv
 import re
 import base64
 import hashlib
@@ -19,6 +20,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from email.utils import getaddresses
+from collections import Counter
 from fastapi.responses import Response, StreamingResponse
 from urllib.parse import urlsplit
 from reportlab.lib import colors
@@ -100,10 +102,11 @@ except ImportError:  # pragma: no cover - optional runtime dependency in some en
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import Pipeline
+    from sklearn.pipeline import FeatureUnion, Pipeline
 except ImportError:  # pragma: no cover - optional ML dependency until installed
     TfidfVectorizer = None
     LogisticRegression = None
+    FeatureUnion = None
     Pipeline = None
 
 load_dotenv()
@@ -226,23 +229,116 @@ def get_alerts_after(last_id: int, limit: int = 100):
 def _build_ml_training_data():
     return [
         ("Hi team, thanks for the update. The project is moving ahead as planned.", "legitimate"),
-        ("Good afternoon, I hope you are well. Please review the attached report at your convenience.", "legitimate"),
+        ("Good afternoon, please review the attached report at your convenience before Thursday's meeting.", "legitimate"),
+        ("The revised agenda is attached. Let me know if you would like another topic added.", "legitimate"),
+        ("Your order has shipped. The carrier expects delivery on Friday; no action is required.", "legitimate"),
+        ("This is the receipt for the subscription renewal you completed today. Contact support through our usual portal with questions.", "legitimate"),
+        ("I have shared the notes from our planning call in the team workspace.", "legitimate"),
+        ("The monthly statement is ready in online banking. Sign in using your saved bookmark to view it.", "legitimate"),
+        ("Your meeting room changed to Building A, room 204. The calendar invitation has been updated.", "legitimate"),
+        ("Please confirm whether the attached draft matches the figures from our approved purchase order.", "legitimate"),
+        ("The support case you opened has been updated. Reply to the existing ticket if you need more help.", "legitimate"),
         ("Urgent security alert: verify your password now to avoid account suspension.", "phishing"),
         ("Action required: your account will be locked unless you sign in and confirm your credentials immediately.", "phishing"),
         ("This is a final warning. Click here to verify your identity before the deadline today.", "phishing"),
-        ("Payment required immediately. We need the invoice confirmation and bank account details before noon.", "fraud"),
         ("Your mailbox has suspicious activity. Click the secure login link and update your username and password.", "phishing"),
+        ("We blocked your email access. Open the attached sign-in page and enter your current password to restore service.", "phishing"),
+        ("Your cloud storage is full. Log in through this link within 30 minutes or your files will be deleted.", "phishing"),
+        ("A new device was added to your account. If this was not you, use this form to cancel and provide your recovery code.", "phishing"),
+        ("Your payroll deposit is pending. Confirm your employee password and bank login on the linked verification page.", "phishing"),
+        ("We could not deliver your package. Pay a small redelivery fee and submit your card details at the link below.", "phishing"),
+        ("The secure document share expired. Enter your corporate credentials to read the invoice attachment.", "phishing"),
+        ("Payment required immediately. We need the invoice confirmation and bank account details before noon.", "fraud"),
         ("Please review the wire transfer change and share your verification details to process the payment.", "fraud"),
-        ("The system detected unusual activity, please login to secure your account before it is restricted.", "suspicious"),
-        ("Need to confirm your information. Reply to this message with your login details to continue.", "suspicious"),
+        ("I am traveling and cannot call. Purchase gift cards for the client and send me the codes as soon as possible.", "fraud"),
+        ("Our supplier changed banks. Send today's outstanding balance to the new account listed in this message.", "fraud"),
+        ("The attached invoice is overdue. Ignore the purchase order process and wire the funds before close of business.", "fraud"),
+        ("Please split the payment into two transfers so our finance review will not delay the confidential transaction.", "fraud"),
+        ("We overpaid your account. Return the difference by wire transfer to the account below and keep this private.", "fraud"),
+        ("I need you to change the vendor bank details in the payment system before the scheduled batch runs.", "fraud"),
+        ("Send the deal deposit today to secure the property. The signed paperwork will arrive after the transfer.", "fraud"),
+        ("Your refund is approved. Provide your card number and online banking code so we can release the funds.", "fraud"),
+        ("The system detected unusual activity. Please review the notice and contact the help desk if you do not recognize it.", "suspicious"),
+        ("Can you confirm which account should receive the next payment? I could not match it to the last statement.", "suspicious"),
+        ("Please open the document and let me know whether you can access it. I will resend through the shared drive if needed.", "suspicious"),
+        ("We need a quick response about the updated contact information before the directory is finalized.", "suspicious"),
+        ("The attachment contains a form requesting your department and work phone. Check with HR if you did not expect it.", "suspicious"),
+        ("A vendor is asking us to use a different payment portal. Verify the request with procurement before changing anything.", "suspicious"),
+        ("Your password expires soon. Use the company bookmark to review the notice, and contact IT if it looks unfamiliar.", "suspicious"),
+        ("Please reply with a convenient time to discuss your account. We will not ask for your password by email.", "suspicious"),
+        ("A shared file is waiting for review. Check the sender and expected project before opening the link.", "suspicious"),
+        ("This message refers to a security review but does not identify the affected service or a support case number.", "suspicious"),
+        ("From: Microsoft Security <account@microsoft-support-check.example> Your Microsoft account needs a password reset now.", "impersonated"),
+        ("The display name says PayPal Support, but the sender address is billing@paypa1-alerts.example. Confirm your card details.", "impersonated"),
+        ("DocuSign requested a document signature from a lookalike domain. Sign in to review the confidential contract.", "impersonated"),
+        ("Google Workspace admin notice from google-security-review.example: confirm your password to keep mail active.", "impersonated"),
+        ("A message using the CEO's name asks payroll to update direct deposit details and keep the change confidential.", "impersonated"),
+        ("The vendor's familiar logo appears in the message, but the Reply-To address is a free webmail account.", "impersonated"),
+        ("Your bank's name is in the subject, while the sender domain is an unrelated registration created for this notice.", "impersonated"),
+        ("A copied Microsoft invoice asks you to pay a new account that does not match the supplier's approved records.", "impersonated"),
+        ("The sender claims to be the company help desk and asks for a one-time login code over email.", "impersonated"),
+        ("A message signed by the finance director requests an urgent gift-card purchase and forbids calling to verify.", "impersonated"),
     ]
 
 
+def _load_ml_training_data():
+    """Use a configured labeled CSV when available, otherwise the demo seed corpus."""
+    seed_data = _build_ml_training_data()
+    seed_counts = dict(Counter(label for _, label in seed_data))
+    seed_metadata = {
+        "source": "built_in_demo_seed",
+        "training_samples": len(seed_data),
+        "class_counts": seed_counts,
+        "warning": "The built-in corpus is synthetic demonstration data. Configure EMAIL_ML_TRAINING_CSV with reviewed labeled examples before relying on classifications.",
+    }
+    dataset_path = os.getenv("EMAIL_ML_TRAINING_CSV", "").strip()
+    if not dataset_path:
+        return seed_data, seed_metadata
+
+    try:
+        if os.path.getsize(dataset_path) > 25 * 1024 * 1024:
+            raise ValueError("Configured CSV exceeds the 25 MB limit.")
+        rows = []
+        with open(dataset_path, "r", encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            if not reader.fieldnames or not {"text", "label"}.issubset(reader.fieldnames):
+                raise ValueError("Configured CSV must have text and label columns.")
+            for row in reader:
+                text = str(row.get("text") or "").strip()
+                label = str(row.get("label") or "").strip().lower()
+                if text and len(text) <= 50000 and label in {"legitimate", "suspicious", "impersonated", "phishing", "fraud"}:
+                    rows.append((text, label))
+                if len(rows) >= 20000:
+                    break
+        counts = dict(Counter(label for _, label in rows))
+        if len(rows) < 15 or len(counts) < 2 or any(count < 3 for count in counts.values()):
+            raise ValueError("Configured CSV needs at least 15 examples and three examples per label.")
+        return rows, {
+            "source": "configured_csv",
+            "training_samples": len(rows),
+            "class_counts": counts,
+        }
+    except (OSError, UnicodeError, csv.Error, ValueError):
+        return seed_data, {
+            **seed_metadata,
+            "warning": "Configured training CSV could not be used; the built-in demonstration corpus was used.",
+        }
+
+
 def classify_email_ml(email_text: str, headers: dict | None = None, urls: list | None = None):
-    """Lightweight ML classifier for email threat labels using TF-IDF + logistic regression."""
+    """Train a local word/character TF-IDF classifier for email-threat triage."""
     text = (email_text or "").strip()
     if not text:
-        return {"model": "TF-IDF logistic regression", "classification": "legitimate", "confidence": 0.0, "probabilities": {}}
+        return {
+            "model": "TF-IDF + logistic regression",
+            "classification": "legitimate",
+            "confidence": 0.0,
+            "probabilities": {},
+            "training_source": "not_run",
+            "training_samples": 0,
+            "class_counts": {},
+            "confidence_note": "No message text was supplied.",
+        }
 
     suspicious_terms = {
         "urgent": 2,
@@ -263,31 +359,44 @@ def classify_email_ml(email_text: str, headers: dict | None = None, urls: list |
     lower = text.lower()
     score = sum(weight for term, weight in suspicious_terms.items() if term in lower)
 
-    if TfidfVectorizer and LogisticRegression:
+    if TfidfVectorizer and LogisticRegression and FeatureUnion:
         model = getattr(classify_email_ml, "_model", None)
         if model is None:
-            training_data = _build_ml_training_data()
+            training_data, training_metadata = _load_ml_training_data()
             model = Pipeline([
-                ("tfidf", TfidfVectorizer(stop_words="english", ngram_range=(1, 2))),
-                ("clf", LogisticRegression(max_iter=1000, class_weight="balanced", solver="liblinear")),
+                ("features", FeatureUnion([
+                    ("word", TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True, max_features=20000)),
+                    ("character", TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), sublinear_tf=True, max_features=20000)),
+                ])),
+                ("clf", LogisticRegression(max_iter=1500, class_weight="balanced", solver="liblinear")),
             ])
             model.fit([sample for sample, _ in training_data], [label for _, label in training_data])
             classify_email_ml._model = model
+            classify_email_ml._training_metadata = training_metadata
 
         prediction = model.predict([text])[0]
         probabilities = model.predict_proba([text])[0]
         confidence = float(max(probabilities))
         label = str(prediction).lower()
-        if label not in {"legitimate", "suspicious", "phishing", "fraud"}:
+        if label not in {"legitimate", "suspicious", "impersonated", "phishing", "fraud"}:
             label = "suspicious"
+        training_metadata = getattr(classify_email_ml, "_training_metadata", {})
         return {
-            "model": "TF-IDF logistic regression",
+            "model": "Word + character TF-IDF logistic regression",
             "classification": label,
             "confidence": round(confidence, 4),
             "probabilities": {cls: round(float(prob), 4) for cls, prob in zip(model.classes_, probabilities)},
+            "training_source": training_metadata.get("source", "unknown"),
+            "training_samples": training_metadata.get("training_samples", 0),
+            "class_counts": training_metadata.get("class_counts", {}),
+            "training_warning": training_metadata.get("warning"),
+            "confidence_note": "The predicted-class score is not calibrated and is a triage signal, not a probability that the email is malicious.",
         }
 
-    if score >= 8 or "verify your password" in lower or "account suspended" in lower:
+    if any(term in lower for term in ("display name mismatch", "lookalike sender", "impersonating", "paypa1", "micr0soft", "g00gle")):
+        classification = "impersonated"
+        confidence = 0.74
+    elif score >= 8 or "verify your password" in lower or "account suspended" in lower:
         classification = "phishing"
         confidence = 0.9
     elif score >= 4:
@@ -301,10 +410,14 @@ def classify_email_ml(email_text: str, headers: dict | None = None, urls: list |
         confidence = 0.65
 
     return {
-        "model": "rule-based ML fallback",
+        "model": "Rule-based fallback (scikit-learn unavailable)",
         "classification": classification,
         "confidence": round(confidence, 4),
-        "probabilities": {"legitimate": 0.15, "suspicious": 0.3, "phishing": 0.55, "fraud": 0.15},
+        "probabilities": {},
+        "training_source": "rule_fallback",
+        "training_samples": 0,
+        "class_counts": {},
+        "confidence_note": "This fallback score is a rule-strength heuristic, not a calibrated model probability.",
     }
 
 
@@ -2310,7 +2423,7 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
     elif score < 25:
         classification = "Low Risk"
 
-    if ml_analysis.get("classification") in {"phishing", "fraud", "suspicious"}:
+    if ml_analysis.get("classification") in {"phishing", "fraud", "suspicious", "impersonated"}:
         classification = ml_analysis["classification"].title()
     elif ml_analysis.get("classification") == "legitimate":
         classification = "Low Risk"
@@ -2368,7 +2481,7 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
 
     result["recommendations"] = build_recommendations(result)
 
-    if score >= 60 or ml_analysis.get("classification") in {"phishing", "fraud", "suspicious"}:
+    if score >= 60 or ml_analysis.get("classification") in {"phishing", "fraud", "suspicious", "impersonated"}:
         alert = push_alert(
             "email_analysis",
             f"High-risk {ml_analysis.get('classification', 'email')} threat detected",

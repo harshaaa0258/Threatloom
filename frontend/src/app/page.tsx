@@ -7,6 +7,7 @@ import CaseManagement from "./CaseManagement";
 import EvidencePanel from "./EvidencePanel";
 import PrivacySettingsPanel from "./PrivacySettingsPanel";
 import AlertFeed from "./AlertFeed";
+import MlClassifierPanel from "./MlClassifierPanel";
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -35,6 +36,7 @@ export default function Home() {
   const [attachments, setAttachments] = useState<any[]>([]);
   const [threatIntelligence, setThreatIntelligence] = useState<any>(null);
   const [nlpAnalysis, setNlpAnalysis] = useState<any>(null);
+  const [mlClassifier, setMlClassifier] = useState<any>(null);
   const [investigations, setInvestigations] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [selectedInvestigation, setSelectedInvestigation] = useState<any>(null);
@@ -85,6 +87,7 @@ useEffect(() => {
   const analyzeEmail = async () => {
     if (selectedFile) {
       setNlpAnalysis(null);
+      setMlClassifier(null);
       try{
   const formData = new FormData();
   formData.append("file", selectedFile);
@@ -171,6 +174,7 @@ useEffect(() => {
   setAttachments(data.attachments || []);
   setThreatIntelligence(data.threat_intelligence || null);
   setNlpAnalysis(data.nlp_analysis || null);
+  setMlClassifier(data.ml_classifier || null);
 setAnalysis(
   `Analysis complete. Threat Score: ${data.threat_score}`
 );
@@ -190,6 +194,7 @@ setAnalysis(
   
     setAnalysis("Analyzing email...");
     setNlpAnalysis(null);
+    setMlClassifier(null);
   
     try {
       const response = await fetch("https://threatloom.onrender.com/analyze", {
@@ -221,6 +226,7 @@ setUrls(data.urls || []);
 setUrlIntelligence(data.url_intelligence || []);
        setDomainIntelligence(data.domain_intelligence || []);
        setThreatIntelligence(data.threat_intelligence || null);
+        setMlClassifier(data.ml_classifier || null);
 setAnalysis(
   `Analysis complete. Threat Score: ${data.threat_score}`
 );
@@ -480,6 +486,7 @@ setAnalysis(
           </section>
         )}
 
+        <MlClassifierPanel data={mlClassifier} />
         <div className="mt-6 grid gap-6 md:grid-cols-3">
          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
   <div className="flex items-center justify-between">
