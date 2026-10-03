@@ -20,6 +20,7 @@ const indicatorTypes = new Set([
   "Reported abusive IP",
   "Configured botnet C2 indicator",
   "Configured open relay indicator",
+  "Verified phishing URL",
 ]);
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -35,7 +36,9 @@ function formatStatus(value: unknown) {
 export default function InfrastructurePanel({ data }: Props) {
   const intelligence = asRecord(data);
   const summary = asRecord(intelligence.infrastructure_summary);
+  const threatSummary = asRecord(intelligence.summary);
   const sourceStatus = asRecord(intelligence.infrastructure_source_status);
+  const threatSourceStatus = asRecord(intelligence.source_status);
   const indicators = Array.isArray(intelligence.indicators)
     ? (intelligence.indicators as InfrastructureIndicator[]).filter((indicator) =>
         indicatorTypes.has(String(indicator.type ?? ""))
@@ -53,16 +56,17 @@ export default function InfrastructurePanel({ data }: Props) {
     ["Abuse reports", summary.abuse_reported_ips],
     ["Botnet C2", summary.botnet_c2_ips],
     ["Open relays", summary.open_relay_ips],
+    ["PhishTank matches", threatSummary.phishtank_matches],
   ];
 
   return (
     <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
-      <h3 className="text-xl font-semibold">Mail infrastructure signals</h3>
+      <h3 className="text-xl font-semibold">Infrastructure and threat-feed signals</h3>
       <p className="mt-1 text-sm text-slate-400">
-        Provider, exit-node, and optional threat-feed matches for public mail IPs.
+        Provider, exit-node, and reputation-feed matches for email infrastructure and links.
       </p>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7">
         {metrics.map(([label, value]) => (
           <div key={label} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
             <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
@@ -77,6 +81,8 @@ export default function InfrastructurePanel({ data }: Props) {
         {[
           ["Tor Project", sourceStatus.tor_project_exit_list],
           ["AbuseIPDB", sourceStatus.abuseipdb],
+          ["VirusTotal", threatSourceStatus.virustotal],
+          ["PhishTank", threatSourceStatus.phishtank],
           ["Botnet C2 list", sourceStatus.botnet_c2_list],
           ["Open relay list", sourceStatus.open_relay_list],
         ].map(([label, value]) => (

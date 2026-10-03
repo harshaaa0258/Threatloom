@@ -88,6 +88,11 @@ except ImportError:
     from domain_fingerprints import fingerprint_hosting, lookup_traditional_whois
 
 try:
+    from .phishing_intel import check_phishtank_urls
+except ImportError:
+    from phishing_intel import check_phishtank_urls
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -1068,6 +1073,8 @@ def build_threat_intelligence_summary(
     for item in url_intelligence:
         malicious = int(item.get("malicious") or 0)
         suspicious = int(item.get("suspicious") or 0)
+        phishtank = item.get("phishtank") or {}
+        phishtank_match = phishtank.get("status") == "found"
 
         if malicious > 0:
             malicious_urls += 1
@@ -1086,6 +1093,17 @@ def build_threat_intelligence_summary(
                 "reason": f"VirusTotal reported {suspicious} suspicious detection(s).",
             })
 
+        if phishtank_match:
+            if malicious == 0:
+                malicious_urls += 1
+            indicators.append({
+                "type": "Verified phishing URL",
+                "value": item.get("url"),
+                "severity": "High",
+                "source": "PhishTank",
+                "reason": "PhishTank reports this exact URL as verified and valid phishing. This is an indicator match, not sender attribution.",
+            })
+
     domain_signals = []
     for item in domain_intelligence:
         for signal in item.get("signals", []):
@@ -1097,6 +1115,19 @@ def build_threat_intelligence_summary(
             })
 
     indicators.extend(domain_signals)
+
+    phishtank_statuses = [
+        (item.get("phishtank") or {}).get("status") for item in url_intelligence
+    ]
+    if "found" in phishtank_statuses or "not_found" in phishtank_statuses:
+        phishtank_status = "available"
+    elif "unavailable" in phishtank_statuses:
+        phishtank_status = "unavailable"
+    elif "not_configured" in phishtank_statuses:
+        phishtank_status = "not_configured"
+    else:
+        phishtank_status = "not_needed"
+    phishtank_matches = sum(status == "found" for status in phishtank_statuses)
 
     if malicious_ips or malicious_urls:
         overall = "High"
@@ -1116,8 +1147,10 @@ def build_threat_intelligence_summary(
             "urls_checked": len(url_intelligence),
             "malicious_urls": malicious_urls,
             "suspicious_urls": suspicious_urls,
+            "phishtank_matches": phishtank_matches,
             "domains_checked": len(domain_intelligence),
         },
+        "source_status": {"phishtank": phishtank_status},
         "indicators": indicators,
         "note": (
             "Threat-intelligence results are external intelligence signals. "
@@ -1678,6 +1711,17 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
             findings.append(
                 "VirusTotal found no malicious or suspicious detections for the URL."
             )    
+
+    # PhishTank checks are opt-in, rate-bounded, and cached by exact URL.
+    phishtank_intelligence = check_phishtank_urls(urls)
+    phishtank_by_url = {item["url"]: item for item in phishtank_intelligence["checks"]}
+    for result in url_intelligence:
+        match = phishtank_by_url.get(result.get("url"), {"status": "not_checked"})
+        result["phishtank"] = {key: value for key, value in match.items() if key != "url"}
+        if match.get("status") == "found":
+            score += 30
+            score_breakdown.append({"reason": "Exact URL matched a verified, valid PhishTank report", "points": 30})
+            findings.append("PhishTank matched an exact URL as verified and valid phishing.")
     # Get sender and Reply-To
     sender = headers.get("from", "")
     reply_to = headers.get("reply-to", "")
@@ -2283,6 +2327,11 @@ def _analyze_email(request: EmailRequest, mask_response: bool):
     threat_intelligence["indicators"].extend(infrastructure_intelligence["indicators"])
     threat_intelligence["infrastructure_summary"] = infrastructure_intelligence["summary"]
     threat_intelligence["infrastructure_source_status"] = infrastructure_intelligence["source_status"]
+    threat_intelligence["source_status"].update({
+        "virustotal": "configured" if VIRUSTOTAL_API_KEY else "not_configured",
+        "abuseipdb": infrastructure_intelligence["source_status"].get("abuseipdb", "unknown"),
+        "phishtank": phishtank_intelligence["source_status"],
+    })
 
     result = {
         "message": "Email analyzed successfully.",
