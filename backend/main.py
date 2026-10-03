@@ -7,14 +7,16 @@ from email.parser import BytesParser
 import dns.resolver
 import requests
 import ipaddress
+import asyncio
 import re
 import base64
 import hashlib
 import json
+import logging
 from dotenv import load_dotenv
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from email.utils import getaddresses
 from fastapi.responses import Response, StreamingResponse
@@ -64,6 +66,21 @@ try:
     from .attribution_assessment import build_attribution_assessment
 except ImportError:
     from attribution_assessment import build_attribution_assessment
+
+try:
+    from .privacy_controls import (
+        get_privacy_settings,
+        initialize_privacy_settings,
+        mask_sensitive_data,
+        update_privacy_settings,
+    )
+except ImportError:
+    from privacy_controls import (
+        get_privacy_settings,
+        initialize_privacy_settings,
+        mask_sensitive_data,
+        update_privacy_settings,
+    )
 
 try:
     import spf
@@ -118,6 +135,12 @@ class EvidenceEventRequest(BaseModel):
     event_type: str
     actor: str = "unattributed"
     notes: str = ""
+
+
+class PrivacySettingsUpdate(BaseModel):
+    retention_days: int | None = None
+    mask_email_addresses: bool | None = None
+    mask_ip_addresses: bool | None = None
 
 
 ALERT_STORE = []
@@ -1210,6 +1233,28 @@ def _evidence_artifact_settings():
     return preserve_source, max_size_mb * 1024 * 1024
 
 
+def _privacy_response(value):
+    return mask_sensitive_data(value, get_privacy_settings(DB_PATH))
+
+
+def _record_evidence_event_if_available(investigation_id: int, event_type: str, actor: str, notes: str):
+    connection = sqlite3.connect(DB_PATH)
+    exists = connection.execute(
+        "SELECT 1 FROM evidence_ledger WHERE investigation_id = ? LIMIT 1",
+        (investigation_id,),
+    ).fetchone()
+    connection.close()
+    if exists:
+        return append_evidence_event(
+            DB_PATH,
+            investigation_id,
+            event_type,
+            actor=actor,
+            notes=notes,
+        )
+    return None
+
+
 def init_database():
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
@@ -1254,8 +1299,80 @@ def init_database():
         END
     """)
     initialize_evidence_tables(connection)
+    initialize_privacy_settings(connection)
     connection.commit()
     connection.close()
+
+
+def run_retention_cleanup():
+    settings = get_privacy_settings(DB_PATH)
+    retention_days = int(settings.get("retention_days") or 0)
+    if retention_days <= 0:
+        return {"success": True, "retention_days": 0, "deleted_count": 0, "message": "Automatic retention is disabled."}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    connection = sqlite3.connect(DB_PATH)
+    expired_ids = [
+        row[0]
+        for row in connection.execute(
+            "SELECT id FROM investigations WHERE created_at < ? ORDER BY id", (cutoff,)
+        ).fetchall()
+    ]
+    connection.close()
+
+    for investigation_id in expired_ids:
+        _record_evidence_event_if_available(
+            investigation_id,
+            "retention_expired",
+            "retention-policy",
+            f"Investigation exceeded the configured {retention_days}-day retention period.",
+        )
+        purge_source_artifact(
+            DB_PATH,
+            investigation_id,
+            actor="retention-policy",
+            reason=f"Configured {retention_days}-day retention period expired.",
+        )
+
+    connection = sqlite3.connect(DB_PATH)
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM investigations WHERE created_at < ?", (cutoff,))
+        deleted_count = cursor.rowcount
+        connection.commit()
+    finally:
+        connection.close()
+    return {
+        "success": True,
+        "retention_days": retention_days,
+        "deleted_count": deleted_count,
+        "cutoff": cutoff,
+    }
+
+
+async def _retention_sweep_loop():
+    while True:
+        try:
+            await asyncio.to_thread(run_retention_cleanup)
+        except Exception:
+            logging.exception("Scheduled privacy retention cleanup failed.")
+        await asyncio.sleep(3600)
+
+
+@app.on_event("startup")
+async def start_retention_sweeper():
+    app.state.retention_task = asyncio.create_task(_retention_sweep_loop())
+
+
+@app.on_event("shutdown")
+async def stop_retention_sweeper():
+    task = getattr(app.state, "retention_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def save_investigation(result: dict):
@@ -1323,6 +1440,30 @@ def health():
     return {"status": "healthy"}
 
 
+@app.get("/privacy/settings")
+def privacy_settings():
+    return get_privacy_settings(DB_PATH)
+
+
+@app.patch("/privacy/settings")
+def update_privacy_settings_endpoint(request: PrivacySettingsUpdate):
+    values = request.dict(exclude_unset=True)
+    if "retention_days" in values and values["retention_days"] is not None:
+        if values["retention_days"] < 0 or values["retention_days"] > 3650:
+            raise HTTPException(status_code=400, detail="Retention must be between 0 and 3650 days.")
+    settings = update_privacy_settings(DB_PATH, values)
+    cleanup = {"deleted_count": 0}
+    if settings["retention_days"] > 0:
+        cleanup = run_retention_cleanup()
+        settings = get_privacy_settings(DB_PATH)
+    return {**settings, "cleanup_deleted_count": cleanup["deleted_count"]}
+
+
+@app.post("/privacy/retention/run")
+def execute_retention_cleanup():
+    return run_retention_cleanup()
+
+
 @app.get("/alerts")
 def alerts():
     return {"alerts": get_alerts()}
@@ -1340,6 +1481,10 @@ def alerts_stream():
 
 @app.post("/analyze")
 def analyze_email(request: EmailRequest):
+    return _analyze_email(request, mask_response=True)
+
+
+def _analyze_email(request: EmailRequest, mask_response: bool):
     email_text = request.email
     source_type = "submitted_text"
     if request.source_file_base64 is not None:
@@ -2119,7 +2264,7 @@ def analyze_email(request: EmailRequest):
     # Persist the generated investigation ID inside the stored record as well.
     update_investigation_result(investigation_id, result)
 
-    return result
+    return _privacy_response(result) if mask_response else result
 
 
 @app.get("/investigations")
@@ -2139,7 +2284,7 @@ def list_investigations(search: str = "", limit: int = 500):
     """, (search.strip(), search_pattern, search_pattern, search_pattern,
           search_pattern, search_pattern, search_pattern, limit)).fetchall()
     connection.close()
-    return {"investigations": [dict(row) for row in rows]}
+    return {"investigations": _privacy_response([dict(row) for row in rows])}
 
 
 def _case_record(row):
@@ -2163,7 +2308,7 @@ def list_cases(search: str = ""):
         ORDER BY c.updated_at DESC, c.id DESC
     """, (search, pattern, pattern, pattern)).fetchall()
     connection.close()
-    return {"cases": [_case_record(row) for row in rows]}
+    return {"cases": _privacy_response([_case_record(row) for row in rows])}
 
 
 @app.post("/cases")
@@ -2203,7 +2348,7 @@ def get_case(case_id: int):
         ORDER BY i.created_at DESC, i.id DESC
     """, (case_id,)).fetchall()
     connection.close()
-    return {"case": _case_record(case), "investigations": [dict(row) for row in investigations]}
+    return _privacy_response({"case": _case_record(case), "investigations": [dict(row) for row in investigations]})
 
 
 @app.patch("/cases/{case_id}")
@@ -2311,7 +2456,7 @@ def investigation_relationship_graph(limit: int = 300):
     ).fetchall()
     connection.close()
 
-    return build_investigation_relationship_graph([dict(row) for row in rows])
+    return _privacy_response(build_investigation_relationship_graph([dict(row) for row in rows]))
 
 
 @app.delete("/investigations/{investigation_id}")
@@ -2321,6 +2466,12 @@ def delete_investigation(investigation_id: int):
         investigation_id,
         actor="system",
         reason="Investigation deleted; preserved source artifact purged.",
+    )
+    _record_evidence_event_if_available(
+        investigation_id,
+        "investigation_deleted",
+        "system",
+        "Investigation record was deleted from the active history.",
     )
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
@@ -2359,6 +2510,12 @@ def clear_investigations():
             investigation_id,
             actor="system",
             reason="All investigations cleared; preserved source artifact purged.",
+        )
+        _record_evidence_event_if_available(
+            investigation_id,
+            "investigation_deleted",
+            "system",
+            "Investigation record was removed by the clear-history action.",
         )
 
     connection = sqlite3.connect(DB_PATH)
@@ -2399,7 +2556,7 @@ def get_investigation(investigation_id: int):
     result["result"] = __import__("json").loads(result.pop("result_json"))
     if not result["result"].get("recommendations"):
         result["result"]["recommendations"] = build_recommendations(result["result"])
-    return result
+    return _privacy_response(result)
 
 
 @app.get("/investigations/{investigation_id}/evidence")
@@ -2407,7 +2564,7 @@ def get_investigation_evidence(investigation_id: int):
     bundle = get_evidence_bundle(DB_PATH, investigation_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="No evidence ledger exists for this investigation.")
-    return bundle
+    return _privacy_response(bundle)
 
 
 @app.post("/investigations/{investigation_id}/evidence/events")
@@ -2437,7 +2594,7 @@ def record_investigation_evidence_event(investigation_id: int, request: Evidence
         )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
-    return {"success": True, "event": entry}
+    return _privacy_response({"success": True, "event": entry})
 
 
 @app.get("/investigations/{investigation_id}/evidence/source")
@@ -2473,11 +2630,11 @@ def download_investigation_source(investigation_id: int):
 def api_ip_intelligence(ip: str):
     """Return geolocation and optional reputation intelligence for one public IP."""
     if not is_public_ip(ip):
-        return {
+        return _privacy_response({
             "status": "invalid",
             "ip": ip,
             "message": "Only public IPv4/IPv6 addresses are supported.",
-        }
+        })
 
     intelligence = lookup_ip(ip)
     reputation = check_virustotal_ip(ip)
@@ -2492,7 +2649,7 @@ def api_ip_intelligence(ip: str):
     else:
         intelligence["threat_status"] = "No Known Threat"
 
-    return intelligence
+    return _privacy_response(intelligence)
 
 
 @app.get("/api/domain-intelligence/{domain}")
@@ -2901,6 +3058,9 @@ def generate_investigation_report(investigation_id: int):
         result = json.loads(stored.get("result_json") or "{}")
     except Exception:
         result = {}
+    privacy_settings = get_privacy_settings(DB_PATH)
+    stored = mask_sensitive_data(stored, privacy_settings)
+    result = mask_sensitive_data(result, privacy_settings)
 
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
@@ -3319,10 +3479,10 @@ async def upload_email(file: UploadFile = File(...)):
             "details": str(e),
         }
 
-    result = analyze_email(EmailRequest(
+    result = _analyze_email(EmailRequest(
         email=email_text,
         source_file_base64=base64.b64encode(content).decode("ascii"),
-    ))
+    ), mask_response=False)
 
     result["attachments"] = attachments
 
@@ -3378,4 +3538,4 @@ async def upload_email(file: UploadFile = File(...)):
     if result.get("investigation_id"):
         update_investigation_result(result["investigation_id"], result)
 
-    return result
+    return _privacy_response(result)
