@@ -58,6 +58,14 @@ export default function InfrastructurePanel({ data }: Props) {
     ["Open relays", summary.open_relay_ips],
     ["PhishTank matches", threatSummary.phishtank_matches],
   ];
+  const sourceStatuses: Array<[string, unknown]> = [
+    ["Tor Project", sourceStatus.tor_project_exit_list],
+    ["AbuseIPDB", sourceStatus.abuseipdb],
+    ["VirusTotal", threatSourceStatus.virustotal],
+    ["PhishTank", threatSourceStatus.phishtank],
+    ["Botnet C2 list", sourceStatus.botnet_c2_list],
+    ["Open relay list", sourceStatus.open_relay_list],
+  ];
 
   return (
     <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
@@ -78,14 +86,7 @@ export default function InfrastructurePanel({ data }: Props) {
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-400">
-        {[
-          ["Tor Project", sourceStatus.tor_project_exit_list],
-          ["AbuseIPDB", sourceStatus.abuseipdb],
-          ["VirusTotal", threatSourceStatus.virustotal],
-          ["PhishTank", threatSourceStatus.phishtank],
-          ["Botnet C2 list", sourceStatus.botnet_c2_list],
-          ["Open relay list", sourceStatus.open_relay_list],
-        ].map(([label, value]) => (
+        {sourceStatuses.map(([label, value]) => (
           <span key={label} className="rounded-full border border-slate-800 bg-slate-950 px-3 py-1">
             {label}: {formatStatus(value)}
           </span>
