@@ -1,6 +1,7 @@
 "use client";
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
+import RelationshipGraph from "./RelationshipGraph";
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -1317,6 +1318,7 @@ role:
   )}
 </div>
 
+        <RelationshipGraph />
         </div>
         <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">

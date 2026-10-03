@@ -9,13 +9,16 @@ import requests
 import ipaddress
 import re
 import base64
+import hashlib
 import json
 from dotenv import load_dotenv
 import os
 import sqlite3
 from datetime import datetime, timezone
 from io import BytesIO
+from email.utils import getaddresses
 from fastapi.responses import StreamingResponse
+from urllib.parse import urlsplit
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -963,6 +966,175 @@ def build_threat_intelligence_summary(
     }
 
 
+def build_investigation_relationship_graph(investigations: list[dict]):
+    """Aggregate email identities and infrastructure shared across investigations."""
+    nodes = {}
+    edges = {}
+
+    def add_node(kind: str, value, investigation_id: int):
+        label = str(value or "").strip().lower().rstrip(".")
+        if not label:
+            return None
+        node_id = hashlib.sha256(f"{kind}:{label}".encode("utf-8")).hexdigest()[:20]
+        node = nodes.setdefault(node_id, {
+            "id": node_id,
+            "type": kind,
+            "label": label,
+            "_investigations": set(),
+        })
+        node["_investigations"].add(investigation_id)
+        return node_id
+
+    def add_edge(source: str | None, target: str | None, relation: str, investigation_id: int):
+        if not source or not target or source == target:
+            return
+        key = (source, target, relation)
+        edge = edges.setdefault(key, {
+            "source": source,
+            "target": target,
+            "relation": relation,
+            "_investigations": set(),
+        })
+        edge["_investigations"].add(investigation_id)
+
+    def parsed_emails(value):
+        found = []
+        for _, address in getaddresses([str(value or "")]):
+            address = address.strip().lower()
+            if re.fullmatch(r"[^\s<>@]+@[^\s<>@]+", address) and address not in found:
+                found.append(address)
+        return found
+
+    def normalized_domain(value):
+        domain = str(value or "").strip().lower().rstrip(".")
+        if domain.startswith("@"):
+            domain = domain[1:]
+        if len(domain) > 253 or not re.fullmatch(r"[a-z0-9.-]+", domain):
+            return None
+        if not any(character.isalpha() for character in domain):
+            return None
+        return domain
+
+    def domains_from_urls(urls):
+        found = []
+        for item in urls if isinstance(urls, list) else []:
+            raw_url = item.get("url") if isinstance(item, dict) else item
+            raw_url = str(raw_url or "").strip()
+            if not raw_url:
+                continue
+            parsed = urlsplit(raw_url if "://" in raw_url else f"//{raw_url}")
+            domain = normalized_domain(parsed.hostname or "")
+            if domain and domain not in found:
+                found.append(domain)
+        return found
+
+    for row in investigations:
+        try:
+            investigation_id = int(row.get("id"))
+            result = json.loads(row.get("result_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(result, dict):
+            continue
+
+        headers = result.get("headers") if isinstance(result.get("headers"), dict) else {}
+        senders = parsed_emails(headers.get("from") or row.get("sender"))
+        recipients = parsed_emails(headers.get("to") or row.get("recipient"))
+        reply_to = parsed_emails(headers.get("reply-to"))
+        return_path = parsed_emails(headers.get("return-path"))
+
+        sender_nodes = [add_node("email", address, investigation_id) for address in senders]
+        recipient_nodes = [add_node("email", address, investigation_id) for address in recipients]
+        reply_nodes = [
+            add_node("domain", address.rsplit("@", 1)[-1], investigation_id)
+            for address in reply_to
+        ]
+        return_nodes = [
+            add_node("domain", address.rsplit("@", 1)[-1], investigation_id)
+            for address in return_path
+        ]
+        sender_domain_nodes = [
+            add_node("domain", address.rsplit("@", 1)[-1], investigation_id)
+            for address in senders
+        ]
+
+        url_domains = result.get("url_domains", [])
+        if not isinstance(url_domains, list):
+            url_domains = []
+        url_domains = [normalized_domain(value) for value in url_domains]
+        url_domains.extend(domains_from_urls(result.get("urls", [])))
+        url_domain_nodes = list(dict.fromkeys(
+            add_node("domain", domain, investigation_id)
+            for domain in url_domains if domain
+        ))
+
+        raw_ips = result.get("ip_addresses", [])
+        if not isinstance(raw_ips, list):
+            raw_ips = []
+        candidate_ip = result.get("candidate_origin_ip") or row.get("origin_ip")
+        if candidate_ip:
+            raw_ips.append(candidate_ip)
+        ip_nodes = []
+        seen_ips = set()
+        for raw_ip in raw_ips:
+            try:
+                ip = str(ipaddress.ip_address(str(raw_ip)))
+            except ValueError:
+                continue
+            if ip not in seen_ips and is_public_ip(ip):
+                seen_ips.add(ip)
+                ip_nodes.append(add_node("ip", ip, investigation_id))
+
+        for sender_node in sender_nodes:
+            for domain_node in sender_domain_nodes:
+                add_edge(sender_node, domain_node, "sender_domain", investigation_id)
+            for recipient_node in recipient_nodes:
+                add_edge(sender_node, recipient_node, "sent_to", investigation_id)
+            for reply_node in reply_nodes:
+                add_edge(sender_node, reply_node, "reply_to_domain", investigation_id)
+            for return_node in return_nodes:
+                add_edge(sender_node, return_node, "return_path_domain", investigation_id)
+            for ip_node in ip_nodes:
+                add_edge(sender_node, ip_node, "observed_origin_ip", investigation_id)
+
+        for domain_node in sender_domain_nodes:
+            for url_node in url_domain_nodes:
+                add_edge(domain_node, url_node, "linked_url_domain", investigation_id)
+            for ip_node in ip_nodes:
+                add_edge(domain_node, ip_node, "observed_with_ip", investigation_id)
+
+    output_nodes = []
+    for node in nodes.values():
+        investigation_ids = sorted(node.pop("_investigations"))
+        node["investigation_count"] = len(investigation_ids)
+        node["investigation_ids"] = investigation_ids[:10]
+        output_nodes.append(node)
+    output_edges = []
+    for edge in edges.values():
+        investigation_ids = sorted(edge.pop("_investigations"))
+        edge["investigation_count"] = len(investigation_ids)
+        edge["investigation_ids"] = investigation_ids[:10]
+        output_edges.append(edge)
+
+    output_nodes.sort(key=lambda node: (-node["investigation_count"], node["type"], node["label"]))
+    output_edges.sort(key=lambda edge: (-edge["investigation_count"], edge["relation"], edge["source"]))
+    return {
+        "nodes": output_nodes,
+        "edges": output_edges,
+        "summary": {
+            "investigations_analyzed": len(investigations),
+            "entities": len(output_nodes),
+            "relationships": len(output_edges),
+            "repeated_entities": sum(node["investigation_count"] > 1 for node in output_nodes),
+            "repeated_relationships": sum(edge["investigation_count"] > 1 for edge in output_edges),
+        },
+        "note": (
+            "Relationships show indicators observed together in saved email analyses. "
+            "They are leads for review, not proof that an entity controls another."
+        ),
+    }
+
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "investigations.db")
 
 
@@ -1770,6 +1942,22 @@ def list_investigations():
     """).fetchall()
     connection.close()
     return {"investigations": [dict(row) for row in rows]}
+
+
+@app.get("/investigations/graph")
+def investigation_relationship_graph(limit: int = 300):
+    """Return cross-investigation email infrastructure relationships."""
+    limit = max(1, min(limit, 1000))
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        "SELECT id, sender, recipient, origin_ip, risk_level, classification, result_json "
+        "FROM investigations ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    connection.close()
+
+    return build_investigation_relationship_graph([dict(row) for row in rows])
 
 
 @app.delete("/investigations/{investigation_id}")
