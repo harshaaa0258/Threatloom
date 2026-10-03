@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const API = "https://threatloom.onrender.com";
 
@@ -23,6 +23,14 @@ function formatTimestamp(value: string) {
 export default function AlertFeed() {
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
   const [connection, setConnection] = useState<"loading" | "live" | "reconnecting" | "unavailable">("loading");
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
+  const seenAlertIds = useRef(new Set<number>());
+
+  useEffect(() => {
+    setNotificationPermission(
+      "Notification" in window ? Notification.permission : "unsupported",
+    );
+  }, []);
 
   useEffect(() => {
     let source: EventSource | undefined;
@@ -37,6 +45,7 @@ export default function AlertFeed() {
 
         const initial = Array.isArray(data.alerts) ? (data.alerts as AlertRecord[]) : [];
         setAlerts(initial.slice(0, 50));
+        initial.forEach((alert) => seenAlertIds.current.add(Number(alert.id)));
         const afterId = initial.reduce((max, alert) => Math.max(max, Number(alert.id) || 0), 0);
         source = new EventSource(`${API}/alerts/stream?after_id=${afterId}`);
         source.onopen = () => setConnection("live");
@@ -44,10 +53,26 @@ export default function AlertFeed() {
         source.onmessage = (event) => {
           try {
             const incoming = JSON.parse(event.data) as AlertRecord;
-            setAlerts((current) => {
-              if (current.some((alert) => alert.id === incoming.id)) return current;
-              return [incoming, ...current].sort((a, b) => b.id - a.id).slice(0, 50);
-            });
+            const alertId = Number(incoming.id);
+            if (!Number.isFinite(alertId) || seenAlertIds.current.has(alertId)) return;
+            seenAlertIds.current.add(alertId);
+            setAlerts((current) => [incoming, ...current].sort((a, b) => b.id - a.id).slice(0, 50));
+
+            const severity = incoming.severity.toLowerCase();
+            if (
+              "Notification" in window &&
+              Notification.permission === "granted" &&
+              ["high", "critical"].includes(severity)
+            ) {
+              const notification = new Notification("MailCipherX-AI high-risk alert", {
+                body: incoming.summary,
+                tag: `mailcipherx-alert-${alertId}`,
+              });
+              notification.onclick = () => {
+                window.focus();
+                notification.close();
+              };
+            }
           } catch {
             // Ignore malformed events and keep the live stream open.
           }
@@ -64,6 +89,18 @@ export default function AlertFeed() {
     };
   }, []);
 
+  const enableBrowserNotifications = async () => {
+    if (!("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    try {
+      setNotificationPermission(await Notification.requestPermission());
+    } catch {
+      setNotificationPermission("denied");
+    }
+  };
+
   const connectionLabel = {
     loading: "Loading",
     live: "Live",
@@ -78,10 +115,25 @@ export default function AlertFeed() {
           <h3 className="text-xl font-semibold">Live Alert Feed</h3>
           <p className="mt-1 text-sm text-slate-400">High-risk analysis events from the threat monitoring service.</p>
         </div>
-        <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${connection === "live" ? "border-emerald-700 text-emerald-300" : "border-slate-700 text-slate-400"}`}>
-          {connectionLabel}
-        </span>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {notificationPermission !== "unsupported" && notificationPermission !== "denied" && (
+            <button
+              type="button"
+              onClick={enableBrowserNotifications}
+              disabled={notificationPermission === "granted"}
+              className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-blue-500 disabled:cursor-default disabled:opacity-70"
+            >
+              {notificationPermission === "granted" ? "Browser alerts on" : "Enable browser alerts"}
+            </button>
+          )}
+          <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${connection === "live" ? "border-emerald-700 text-emerald-300" : "border-slate-700 text-slate-400"}`}>
+            {connectionLabel}
+          </span>
+        </div>
       </div>
+      {notificationPermission === "denied" && (
+        <p className="mt-3 text-xs text-slate-500">Browser alerts are blocked in this browser's site settings.</p>
+      )}
 
       {alerts.length === 0 ? (
         <p className="mt-5 rounded-lg border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
