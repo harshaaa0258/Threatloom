@@ -27,6 +27,11 @@ from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 
 try:
+    from .infrastructure_intel import build_infrastructure_intelligence
+except ImportError:
+    from infrastructure_intel import build_infrastructure_intelligence
+
+try:
     import spf
 except ImportError:  # pragma: no cover - optional runtime dependency in some environments
     spf = None
@@ -773,7 +778,7 @@ def lookup_ip(ip: str):
         response = requests.get(
             f"http://ip-api.com/json/{ip}",
             params={
-                "fields": "status,message,country,regionName,city,lat,lon,isp,org,as,query"
+                "fields": "status,message,country,regionName,city,lat,lon,isp,org,as,asname,proxy,hosting,query"
             },
             timeout=5,
         )
@@ -792,6 +797,9 @@ def lookup_ip(ip: str):
                 "isp": data.get("isp"),
                 "organization": data.get("org"),
                 "asn": data.get("as"),
+                "as_name": data.get("asname"),
+                "is_proxy": data.get("proxy"),
+                "is_hosting": data.get("hosting"),
                 "location_accuracy": "approximate",
             }
 
@@ -1881,6 +1889,10 @@ def analyze_email(request: EmailRequest):
         domain_intelligence,
         url_intelligence,
     )
+    infrastructure_intelligence = build_infrastructure_intelligence(ip_intelligence)
+    threat_intelligence["indicators"].extend(infrastructure_intelligence["indicators"])
+    threat_intelligence["infrastructure_summary"] = infrastructure_intelligence["summary"]
+    threat_intelligence["infrastructure_source_status"] = infrastructure_intelligence["source_status"]
 
     result = {
         "message": "Email analyzed successfully.",
@@ -1894,6 +1906,7 @@ def analyze_email(request: EmailRequest):
         "domain_intelligence": domain_intelligence,
         "url_intelligence": url_intelligence,
         "threat_intelligence": threat_intelligence,
+        "infrastructure_intelligence": infrastructure_intelligence,
         "nlp_analysis": nlp_analysis,
         "ml_classifier": ml_analysis,
         "received_headers": received_headers,

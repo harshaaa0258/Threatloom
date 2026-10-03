@@ -2,6 +2,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 import RelationshipGraph from "./RelationshipGraph";
+import InfrastructurePanel from "./InfrastructurePanel";
 const MapView = dynamic(() => import("./MapView"), {
   ssr: false,
 });
@@ -1175,6 +1176,7 @@ role:
     </p>
   </div>
 )}
+<InfrastructurePanel data={threatIntelligence} />
 {/* Threat Intelligence Summary */}
         <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900 p-6 lg:col-span-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
